@@ -1,0 +1,45 @@
+{
+  "schema_version": "0.1",
+  "id": "example-draft",
+  "purpose": "Template for an authorized repository and staging web audit",
+  "authorization": {
+    "status": "draft",
+    "approved_by": null,
+    "reference": null,
+    "approved_at": null,
+    "expires_at": null,
+    "scope_sha256": null
+  },
+  "scope": {
+    "repositories": ["/REPLACE_WITH_APPROVED_REPOSITORY"],
+    "web_origins": ["https://staging.example.invalid"],
+    "network_ranges": [],
+    "network_ports": [],
+    "excluded_path_prefixes": ["/logout", "/admin/delete", "/payments"],
+    "http_methods": ["GET", "HEAD", "OPTIONS"]
+  },
+  "actions": {
+    "local_audit": true,
+    "web_observe": false,
+    "web_validate": false,
+    "network_discovery": false
+  },
+  "intelligence": {
+    "mode": "offline",
+    "providers": [],
+    "disclosure": {
+      "cve_ids": false,
+      "public_package_versions": false,
+      "target_identifiers": false
+    }
+  },
+  "limits": {
+    "max_model_actions": 30,
+    "max_parallel_tools": 2,
+    "max_tool_seconds": 300,
+    "max_requests_per_second_per_target": 2,
+    "max_total_target_requests": 500,
+    "max_evidence_mib": 250
+  },
+  "credential_refs": []
+}

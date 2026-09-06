@@ -1,0 +1,37 @@
+{
+  "schema_version": "0.1",
+  "status": "source_review_only",
+  "enabled": false,
+  "upstream": {
+    "repository": "https://github.com/mukul975/cve-mcp-server",
+    "revision": "d666bac3743574cecc98bcbf524558c2bf0d8e61",
+    "version_in_pyproject": "0.2.0",
+    "registered_tool_count_observed": 28,
+    "dependency_lock_sha256": null,
+    "verified_mcp_schema_sha256": null
+  },
+  "transport": "stdio",
+  "entrypoint": ["python", "-m", "cve_mcp.server"],
+  "initial_tool_contracts": [
+    {"name": "lookup_cve", "arguments": {"cve_id": "string"}},
+    {"name": "get_epss_score", "arguments": {"cve_ids": "string"}},
+    {"name": "check_kev", "arguments": {"cve_id": "string"}}
+  ],
+  "deferred_tools": [
+    {
+      "name": "triage_cve",
+      "fixed_arguments": {"depth": "quick"},
+      "reason": "Review fallback provider calls and test missing-data normalization before enabling."
+    }
+  ],
+  "candidate_provider_origins": [
+    "https://services.nvd.nist.gov",
+    "https://api.first.org",
+    "https://www.cisa.gov",
+    "https://raw.githubusercontent.com"
+  ],
+  "provider_path_review_complete": false,
+  "credential_environment_names": ["NVD_API_KEY"],
+  "offline_behavior": "Do not start this sidecar; use recorded normalized intelligence instead.",
+  "readiness": "Disabled until dependency lock, exact MCP schemas, provider paths, environment isolation, redaction, and integration tests are verified."
+}

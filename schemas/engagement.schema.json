@@ -1,0 +1,114 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Argo engagement v0.1",
+  "description": "Structural design contract only. Runtime must enforce authorization, canonical scope, expiry, path containment, credential bindings, and network boundaries.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "purpose", "authorization", "scope", "actions", "intelligence", "limits", "credential_refs"],
+  "properties": {
+    "schema_version": {"const": "0.1"},
+    "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,63}$"},
+    "purpose": {"type": "string", "minLength": 1, "maxLength": 1000},
+    "authorization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "approved_by", "reference", "approved_at", "expires_at", "scope_sha256"],
+      "properties": {
+        "status": {"enum": ["draft", "authorized"]},
+        "approved_by": {"type": ["string", "null"], "minLength": 1},
+        "reference": {"type": ["string", "null"], "minLength": 1},
+        "approved_at": {"type": ["string", "null"], "format": "date-time"},
+        "expires_at": {"type": ["string", "null"], "format": "date-time"},
+        "scope_sha256": {"type": ["string", "null"], "pattern": "^[a-f0-9]{64}$"}
+      },
+      "allOf": [{
+        "if": {"properties": {"status": {"const": "authorized"}}},
+        "then": {"properties": {
+          "approved_by": {"type": "string"},
+          "reference": {"type": "string"},
+          "approved_at": {"type": "string"},
+          "expires_at": {"type": "string"},
+          "scope_sha256": {"type": "string"}
+        }}
+      }]
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repositories", "web_origins", "network_ranges", "network_ports", "excluded_path_prefixes", "http_methods"],
+      "properties": {
+        "repositories": {"type": "array", "uniqueItems": true, "maxItems": 20, "items": {"type": "string", "pattern": "^/", "minLength": 2}},
+        "web_origins": {"type": "array", "uniqueItems": true, "maxItems": 50, "items": {"type": "string", "format": "uri", "pattern": "^https?://[^/?#@\\s]+$"}},
+        "network_ranges": {"type": "array", "uniqueItems": true, "maxItems": 50, "items": {"type": "string", "minLength": 3}},
+        "network_ports": {"type": "array", "uniqueItems": true, "maxItems": 100, "items": {"type": "integer", "minimum": 1, "maximum": 65535}},
+        "excluded_path_prefixes": {"type": "array", "uniqueItems": true, "items": {"type": "string", "pattern": "^/"}},
+        "http_methods": {"type": "array", "uniqueItems": true, "items": {"enum": ["GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE"]}}
+      }
+    },
+    "actions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["local_audit", "web_observe", "web_validate", "network_discovery"],
+      "properties": {
+        "local_audit": {"type": "boolean"},
+        "web_observe": {"type": "boolean"},
+        "web_validate": {"type": "boolean"},
+        "network_discovery": {"type": "boolean"}
+      }
+    },
+    "intelligence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "providers", "disclosure"],
+      "properties": {
+        "mode": {"enum": ["offline", "connected"]},
+        "providers": {"type": "array", "uniqueItems": true, "items": {"enum": ["nvd", "epss", "cisa_kev", "osv"]}},
+        "disclosure": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["cve_ids", "public_package_versions", "target_identifiers"],
+          "properties": {
+            "cve_ids": {"type": "boolean"},
+            "public_package_versions": {"type": "boolean"},
+            "target_identifiers": {"const": false}
+          }
+        }
+      },
+      "allOf": [{
+        "if": {"properties": {"mode": {"const": "offline"}}},
+        "then": {"properties": {
+          "providers": {"maxItems": 0},
+          "disclosure": {"properties": {"cve_ids": {"const": false}, "public_package_versions": {"const": false}}}
+        }}
+      }]
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["max_model_actions", "max_parallel_tools", "max_tool_seconds", "max_requests_per_second_per_target", "max_total_target_requests", "max_evidence_mib"],
+      "properties": {
+        "max_model_actions": {"type": "integer", "minimum": 1, "maximum": 100},
+        "max_parallel_tools": {"type": "integer", "minimum": 1, "maximum": 4},
+        "max_tool_seconds": {"type": "integer", "minimum": 1, "maximum": 600},
+        "max_requests_per_second_per_target": {"type": "number", "exclusiveMinimum": 0, "maximum": 10},
+        "max_total_target_requests": {"type": "integer", "minimum": 1, "maximum": 10000},
+        "max_evidence_mib": {"type": "integer", "minimum": 1, "maximum": 1024}
+      }
+    },
+    "credential_refs": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "hush_ref", "origin", "role"],
+        "properties": {
+          "name": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$"},
+          "hush_ref": {"type": "string", "pattern": "^hush:[A-Za-z0-9_.-]+$"},
+          "origin": {"type": "string", "format": "uri", "pattern": "^https?://[^/?#@\\s]+$"},
+          "role": {"type": "string", "minLength": 1}
+        }
+      }
+    }
+  }
+}
