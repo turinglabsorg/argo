@@ -1,0 +1,27 @@
+{
+  "name": "deepwiki",
+  "endpoint": "https://mcp.deepwiki.com/mcp",
+  "tools": [
+    {
+      "name": "read_wiki_structure",
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "repoName": {
+            "type": "string",
+            "enum": [
+              "python/cpython",
+              "pallets/flask",
+              "psf/requests",
+              "pytest-dev/pytest"
+            ]
+          }
+        },
+        "required": [
+          "repoName"
+        ],
+        "additionalProperties": false
+      }
+    }
+  ]
+}

@@ -10,6 +10,7 @@ from argo.controller import run
 from argo.inference import local_models
 from argo.lab import create_fixture, lab_server
 from argo.scope import authorize, normalize
+from argo.workspace import worker_image
 
 DEFAULT_STATE = Path.home() / ".argo" / "runs"
 CYBER_MODELS = ["argo-foundation-sec:8b", "argo-vulnllm:7b"]
@@ -29,6 +30,7 @@ def doctor():
         "executables": {name: shutil.which(name) for name in ("python3", "docker", "ollama")},
         "ollama": {"status": "unavailable"},
         "docker": {"status": "unavailable"},
+        "worker": {"status": "not installed"},
     }
     try:
         result["ollama"] = {
@@ -44,6 +46,12 @@ def doctor():
         if response.returncode == 0:
             result["docker"] = {"status": "ready", "version": response.stdout.decode().strip()}
     except (OSError, subprocess.TimeoutExpired):
+        pass
+    try:
+        image = worker_image()
+        response = subprocess.run(["docker", "image", "inspect", image], capture_output=True, timeout=5)
+        result["worker"] = {"status": "ready" if response.returncode == 0 else "image unavailable", "image": image, "code_network": "none", "host_mounts": []}
+    except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired):
         pass
     return result
 

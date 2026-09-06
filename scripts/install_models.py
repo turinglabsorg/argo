@@ -1,3 +1,4 @@
+import argparse
 import hashlib
 import json
 import os
@@ -15,7 +16,7 @@ def sha256(path):
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
-def download(url, model, path):
+def download(url, model, path, parallel=8):
     size = model["size"]
     part_size = 128 * 1024**2
     segments = [
@@ -56,7 +57,7 @@ def download(url, model, path):
                     raise
                 time.sleep(min(2**attempt, 15))
 
-    with ThreadPoolExecutor(max_workers=8) as pool:
+    with ThreadPoolExecutor(max_workers=parallel) as pool:
         futures = [pool.submit(fetch, segment) for segment in segments]
         for index, future in enumerate(as_completed(futures), 1):
             future.result()
@@ -77,21 +78,28 @@ def download(url, model, path):
 def main():
     root = Path(__file__).resolve().parents[1]
     registry = json.loads((root / "config/models.lock.json").read_text())
+    parser = argparse.ArgumentParser(description="Install checksum-pinned local Argo model artifacts")
+    parser.add_argument("--model", choices=[model["alias"] for model in registry["models"]])
+    parser.add_argument("--parallel", type=int, choices=range(1, 33), default=8)
+    args = parser.parse_args()
     destination = Path.home() / ".argo" / "models"
     destination.mkdir(parents=True, mode=0o700, exist_ok=True)
     for model in registry["models"]:
+        if args.model and model["alias"] != args.model:
+            continue
         path = destination / model["filename"]
         if not path.is_file() or sha256(path) != model["sha256"]:
             if shutil.disk_usage(destination).free < model["size"] * 2 + 5 * 1024**3:
                 raise RuntimeError("Insufficient disk space for model download and Ollama import")
             url = f"https://huggingface.co/{model['repository']}/resolve/{model['revision']}/{model['filename']}"
             print(f"Downloading pinned {model['alias']}", flush=True)
-            download(url, model, path)
+            download(url, model, path, args.parallel)
         print(f"Verified SHA-256: {model['alias']}", flush=True)
         modelfile = destination / (model["alias"].replace(":", "-") + ".Modelfile")
         modelfile.write_text(f"FROM {path}\nPARAMETER num_ctx 8192\nPARAMETER temperature 0\n")
+        print(f"Importing {model['alias']} into Ollama", flush=True)
         result = subprocess.run(
-            ["ollama", "create", model["alias"], "-f", str(modelfile)], capture_output=True, timeout=300
+            ["ollama", "create", model["alias"], "-f", str(modelfile)], capture_output=True, timeout=900
         )
         if result.returncode:
             raise RuntimeError(

@@ -105,7 +105,7 @@ async def test_tui_stream_chat_context_and_cancellation(tmp_path, monkeypatch):
     app = ArgoApp(tmp_path)
     async with app.run_test() as pilot:
         app.dispatch("/model vulnllm")
-        app.dispatch("Explain this finding")
+        app.dispatch("/chat Explain this finding")
         await pilot.pause()
         assert app.busy
         assert captured["model"] == "argo-vulnllm:7b"
@@ -265,3 +265,45 @@ def test_chat_rejects_echo_and_escapes_foundation_role_markers(monkeypatch):
     )
     with pytest.raises(RuntimeError, match="repeated the question"):
         answer("argo-foundation-sec:8b", "Repeated question", [], {})
+
+
+@pytest.mark.asyncio
+@pytest.mark.live
+@pytest.mark.parametrize("size", [(140, 44), (80, 24)])
+async def test_tui_agent_edits_tests_diff_and_continuation(tmp_path, monkeypatch, size):
+    monkeypatch.setattr("argo.agent.ready", lambda: None)
+    decisions = iter([
+        {"action": "code.edit", "parameters": {"paths": ["app.py", "test_app.py"], "instruction": "Create a function and tests"}},
+        {"action": "python.tests", "parameters": {}},
+        {"action": "finish", "parameters": {"summary": "Created code and passed tests"}},
+        {"action": "workspace.read", "parameters": {"path": "app.py"}},
+        {"action": "finish", "parameters": {"summary": "The saved function returns 42"}},
+    ])
+    monkeypatch.setattr("argo.agent.structured", lambda *a, **k: next(decisions))
+    monkeypatch.setattr("argo.agent.edit", lambda *a, **k: {"app.py": "def answer():\n    return 42\n", "test_app.py": "from app import answer\ndef test_answer():\n    assert answer() == 42\n"})
+    app = ArgoApp(tmp_path / "runs")
+    async with app.run_test(size=size) as pilot:
+        app.dispatch("/mcp off")
+        app.dispatch("Create a function returning 42 and test it")
+        await wait_idle(app, pilot)
+        assert app.report_data["kind"] == "isolated_agent"
+        assert app.report_data["status"] == "complete"
+        identity = app.current_run.name
+        assert "app.py" in app.agent_seed
+        app.dispatch("/evidence")
+        await pilot.pause()
+        assert '"exit_code": 0' in app.screen.query_one("#report-content", TextArea).text
+        await pilot.press("escape")
+        app.dispatch("/diff")
+        await pilot.pause()
+        assert "+def answer" in app.screen.query_one("#report-content", TextArea).text
+        await pilot.press("escape")
+        app.dispatch("Explain the saved function")
+        await wait_idle(app, pilot)
+        assert app.current_run.name != identity
+        assert "app.py" in app.agent_seed
+        app.dispatch("/reset")
+        assert app.agent_seed == {}
+        app.dispatch("/resume " + identity)
+        assert "app.py" in app.agent_seed
+        assert app.query_one("#views", TabbedContent).active == "chat-tab"

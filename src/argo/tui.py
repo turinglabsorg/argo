@@ -23,14 +23,25 @@ from textual.widgets import (
     TextArea,
 )
 
+from argo.agent import import_sources, restore, run_agent
+from argo.agent_demo import demo as agent_demo
+from argo.agent_models import CODER
 from argo.chat import answer, display_text
 from argo.contracts import Actions, Engagement, Scope
 from argo.controller import Cancelled, run
 from argo.evidence import clean, read_evidence, read_state
+from argo.mcp import default_profile, load_profile
 from argo.scope import authorize, check_authorization, digest, load, normalize, save
 from argo.services import CYBER_MODELS, demo, doctor, run_path
 
 COMMANDS = [
+    "/agent",
+    "/agent-demo",
+    "/chat",
+    "/import",
+    "/reset",
+    "/diff",
+    "/mcp",
     "/new",
     "/open",
     "/scope",
@@ -49,7 +60,15 @@ COMMANDS = [
     "/help",
     "/quit",
 ]
-HELP = """Create a case      /new
+HELP = """Isolated agent     Type a task, or /agent TASK
+Agent SQL lab      /agent-demo
+Import project     /import /path/to/project
+Fresh workspace    /reset
+Review code diff   /diff
+MCP configuration  /mcp [on | off | /path/to/profile.json]
+Advisory chat      /chat QUESTION
+
+Create a case      /new
 Open a case        /open /path/to/engagement.json
 Review scope       /scope
 Authorize scope    /authorize
@@ -65,8 +84,11 @@ Chat model         /model foundation | vulnllm
 Service readiness  /doctor
 Cancel work        /stop or Escape
 
-Type a question to discuss the selected finding or case with the local cyber model.
-Tab completes commands. Up/down recall prompts. Chat stays in memory; audit reports are saved locally."""
+Plain text starts the agent in an offline Docker workspace. It can create and change code,
+run Python, pytest and Bandit, and consult approved MCP tools through a separate broker.
+Code stays outside your projects: /import copies sanitized sources and /diff shows changes.
+/resume restores saved agent files for the next task. /reset starts empty.
+Tab completes commands. Up/down recall prompts. Reports and code are saved locally."""
 
 
 class Prompt(Input):
@@ -246,6 +268,9 @@ class ArgoApp(App):
         self.streaming = None
         self.ready_models = set()
         self.ollama_status = "checking"
+        self.agent_seed = {}
+        self.agent_profile = default_profile()
+        self.agent_mcp = True
 
     def ui(self, selector, widget_type):
         return self.screen_stack[0].query_one(selector, widget_type)
@@ -284,11 +309,11 @@ class ArgoApp(App):
                 yield Button("Run audit", id="run-audit", variant="primary")
                 yield Button("Stop", id="stop-audit", disabled=True)
                 yield Static(
-                    "/scope    Review targets\n/authorize  Record permission\n/demo     Try the local lab\n/help     All commands",
+                    "/import   Copy project\n/agent-demo  Try isolated agent\n/diff     Review changes\n/help     All commands",
                     classes="sidebar-help",
                     markup=False,
                 )
-        yield Static("Ready  ·  /new to create an audit  ·  /demo to try the lab", id="status", markup=False)
+        yield Static("Ready  ·  isolated workspace  ·  /agent-demo to try the lab", id="status", markup=False)
         yield Prompt()
         yield Footer()
 
@@ -297,7 +322,7 @@ class ArgoApp(App):
         self.ui("#runs", DataTable).add_columns("Created", "Case", "Status", "Findings", "Run ID")
         self.say(
             "ARGO",
-            "A local workspace for security audits.\n\nCreate an audit with /new, open an engagement with /open, or run /demo against the isolated lab.\nAsk a question to talk to Foundation-Sec; use /model vulnllm for source vulnerability analysis.",
+            "Describe a task: Argo can create code, review vulnerabilities, make fixes and run tests inside Docker.\n\nThe code worker has no network, host files or credentials. /import copies a project into it; /diff shows exported changes. The next task continues that workspace.\nTry /agent-demo for a SQL injection repair with regression tests. /chat opens advisory discussion; /help lists commands.",
         )
         if self.engagement_path:
             self.open_case(self.engagement_path)
@@ -321,7 +346,7 @@ class ArgoApp(App):
         for old in list(container.children)[:-199]:
             old.remove()
         container.mount(widget)
-        container.scroll_end(animate=False)
+        self.call_after_refresh(container.scroll_end, animate=False)
         return widget
 
     def set_status(self, text):
@@ -342,11 +367,15 @@ class ArgoApp(App):
                 )
             )
         elif self.report_data:
+            details = (
+                "ISOLATED WORKSPACE\n" + self.report_data["status"].upper()
+                + "\n\nType a task to continue.\n/diff reviews changes.\n/reset starts empty."
+                if self.report_data.get("kind") == "isolated_agent"
+                else self.report_data["engagement_id"]
+                + "\nREPORT REVIEW\n\nOpen an engagement to run or retest."
+            )
             self.ui("#scope-summary", Static).update(
-                display_text(
-                    self.report_data["engagement_id"]
-                    + "\nREPORT REVIEW\n\nOpen an engagement to run or retest."
-                )
+                display_text(details)
             )
         self.ui("#run-audit", Button).disabled = self.busy or self.engagement is None
         self.ui("#stop-audit", Button).disabled = not self.busy
@@ -358,7 +387,8 @@ class ArgoApp(App):
             if self.model in self.ready_models
             else ("Not installed" if self.ollama_status == "ready" else "Ollama " + self.ollama_status)
         )
-        self.ui("#model-summary", Static).update(label + "\n" + state + "\n\nAudit uses both cyber models")
+        coder = "Installed locally" if CODER in self.ready_models else "Not installed"
+        self.ui("#model-summary", Static).update(label + "\n" + state + "\n\nCODER / COORDINATOR\nQwen3-Coder · 30B / A3B\n" + coder + "\n\nCode: Docker / offline\nMCP: separate broker")
 
     @work(thread=True, exit_on_error=False)
     def check_services(self):
@@ -428,13 +458,37 @@ class ArgoApp(App):
         self.ui("#views", TabbedContent).active = "chat-tab"
         self.say("YOU", prompt)
         if not prompt.startswith("/"):
-            self.start_chat(display_text(prompt))
+            self.start_agent(display_text(prompt))
             return
         try:
             parts = shlex.split(prompt)
             command, args = parts[0], parts[1:]
             if command == "/help":
                 self.action_help()
+            elif command == "/chat" and args:
+                self.start_chat(prompt[len("/chat "):])
+            elif command == "/agent" and args:
+                self.start_agent(prompt[len("/agent "):])
+            elif command == "/agent-demo" and not args:
+                self.begin("Starting the isolated agent lab")
+                self.agent_work(None, True)
+            elif command == "/import" and len(args) == 1:
+                self.begin("Copying selected project sources")
+                self.import_project(Path(args[0]))
+            elif command == "/reset" and not args:
+                self.agent_seed = {}
+                self.say("ARGO", "The next agent task starts with an empty workspace. Saved runs remain available.")
+            elif command == "/diff" and not args:
+                if not self.current_run or not (self.current_run / "changes.diff").is_file():
+                    raise ValueError("Run or resume an isolated agent task first.")
+                self.push_screen(ReportScreen(self.current_run / "changes.diff"))
+            elif command == "/mcp" and len(args) <= 1:
+                if args and args[0] in {"on", "off"}:
+                    self.agent_mcp = args[0] == "on"
+                elif args:
+                    self.agent_profile = load_profile(Path(args[0]).expanduser())
+                    self.agent_mcp = True
+                self.say("ARGO", json.dumps({"enabled": self.agent_mcp, "profile": self.agent_profile.model_dump()}, indent=2))
             elif command == "/new":
                 self.push_screen(NewCase(), self.new_case_result)
             elif command == "/open" and len(args) == 1:
@@ -482,7 +536,13 @@ class ArgoApp(App):
                 identities = {
                     identity for item in self.report_data["findings"] for identity in item["evidence_ids"]
                 }
-                identity = args[0] if args else (self.selected_finding or {}).get("evidence_ids", [None])[0]
+                default_identity = (self.selected_finding or {}).get("evidence_ids", [None])[0]
+                if self.report_data.get("kind") == "isolated_agent":
+                    records = [item["evidence_id"] for item in self.report_data.get("tools", [])]
+                    identities.update(records)
+                    identities.add(self.report_data["workspace_evidence"])
+                    default_identity = records[-1] if records else self.report_data["workspace_evidence"]
+                identity = args[0] if args else default_identity
                 if identity not in identities:
                     raise ValueError("Select a finding or specify one of its evidence IDs")
                 evidence = read_evidence(self.current_run, identity)
@@ -557,6 +617,45 @@ class ArgoApp(App):
     def task_failed(self, message):
         self.say("ERROR", message)
         self.set_status("Stopped" if self.cancel_event.is_set() else "Failed · see conversation")
+        self.finish()
+
+    def start_agent(self, prompt):
+        self.begin("Starting isolated agent · " + CODER)
+        self.agent_work(prompt)
+
+    @work(thread=True, exit_on_error=False)
+    def import_project(self, path):
+        try:
+            files = import_sources(path)
+            self.call_from_thread(self.import_done, files)
+        except Exception as exc:
+            self.call_from_thread(self.task_failed, display_text(str(exc)))
+
+    def import_done(self, files):
+        self.agent_seed = files
+        self.say("ARGO", f"Copied {len(files)} sanitized source files. The next task edits only this isolated copy.")
+        self.set_status("Project copy ready")
+        self.finish()
+
+    @work(thread=True, exit_on_error=False)
+    def agent_work(self, prompt, lab=False):
+        try:
+            options = {
+                "profile": self.agent_profile, "use_mcp": self.agent_mcp,
+                "cancelled": self.cancel_event.is_set,
+                "on_progress": lambda data: self.call_from_thread(self.progress, data),
+            }
+            result = agent_demo(self.state_root, **options) if lab else run_agent(prompt, self.state_root, seed=self.agent_seed, **options)
+            self.call_from_thread(self.agent_done, result)
+        except Exception as exc:
+            self.call_from_thread(self.task_failed, display_text(str(exc)))
+
+    def agent_done(self, result):
+        self.resume(result["run_id"])
+        self.set_status(result["status"].capitalize() + " · isolated worker removed")
+        if result.get("independent_validation"):
+            self.say("ARGO", json.dumps(result["independent_validation"], indent=2))
+        self.refresh_runs()
         self.finish()
 
     @work(thread=True, exit_on_error=False)
@@ -691,11 +790,17 @@ class ArgoApp(App):
             self.selected_finding = None
             self.refresh_findings()
             self.refresh_case()
+            if report.get("kind") == "isolated_agent":
+                self.agent_seed = restore(path)
+                self.ui("#views", TabbedContent).active = "chat-tab"
+                self.say("ARGO", report["summary"] + f"\n\nCode: {path / 'code'}\nDiff: {path / 'changes.diff'}\n{len(self.agent_seed)} files restored. Type the next task to continue, or /reset to start empty.")
+                self.set_status("Reviewing agent run " + identity[:12])
+                return
             self.set_status("Reviewing " + identity[:12] + f" · {len(report['findings'])} findings")
             self.ui("#views", TabbedContent).active = "findings-tab"
             self.say(
                 "ARGO",
-                f"Loaded run {identity}. {len(report['findings'])} findings.\nReport: {path / 'report.md'}\nUse /report to read it, or ask a question about a finding.",
+                f"Loaded run {identity}. {len(report['findings'])} findings.\nReport: {path / 'report.md'}\nUse /report to read it or /chat to discuss a finding. /import copies a selected project for isolated editing.",
             )
         except Exception as exc:
             self.say("ERROR", str(exc))

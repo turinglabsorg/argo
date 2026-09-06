@@ -5,9 +5,13 @@ import re
 import sys
 from pathlib import Path
 
+from argo.agent import import_sources, restore, run_agent
+from argo.agent_demo import demo as agent_demo
+from argo.agent_models import CODER, MODELS
 from argo.contracts import Actions, Engagement, Scope
 from argo.controller import run
 from argo.evidence import read_state, redact, verify
+from argo.mcp import MCPClient, default_profile, load_profile
 from argo.scope import ScopeError, authorize, digest, load, normalize, save
 from argo.services import CYBER_MODELS, DEFAULT_STATE, demo, doctor, run_path
 from argo.tui import ArgoApp
@@ -23,6 +27,18 @@ def main():
     commands.add_parser("tui").add_argument("file", nargs="?", type=Path)
     commands.add_parser("doctor")
     commands.add_parser("runs")
+    for name in ("agent", "agent-demo"):
+        sub = commands.add_parser(name, help="Run the agent in an offline Docker workspace")
+        if name == "agent":
+            sub.add_argument("task")
+            inputs = sub.add_mutually_exclusive_group()
+            inputs.add_argument("--import", dest="source", type=Path, help="Copy sanitized project sources; originals stay outside the worker")
+            inputs.add_argument("--continue", dest="previous", help="Continue the verified workspace of a saved run")
+        sub.add_argument("--no-mcp", action="store_true")
+        sub.add_argument("--mcp-profile", type=Path)
+        sub.add_argument("--max-steps", type=int, default=24)
+        sub.add_argument("--planner", choices=MODELS, default=CODER)
+    commands.add_parser("mcp-tools").add_argument("--profile", type=Path)
     init = commands.add_parser("init")
     init.add_argument("file", type=Path)
     init.add_argument("--id", required=True)
@@ -66,6 +82,21 @@ def main():
             return 0
         if args.command == "doctor":
             output = doctor()
+        elif args.command in {"agent", "agent-demo"}:
+            options = {
+                "use_mcp": not args.no_mcp,
+                "profile": load_profile(args.mcp_profile) if args.mcp_profile else None,
+                "max_steps": args.max_steps, "planner": args.planner,
+                "on_progress": lambda event: print(json.dumps(event), file=sys.stderr, flush=True),
+            }
+            if args.command == "agent-demo":
+                output = agent_demo(args.state_dir, **options)
+            else:
+                seed = import_sources(args.source) if args.source else (restore(run_path(args.state_dir, args.previous)) if args.previous else {})
+                output = run_agent(args.task, args.state_dir, seed=seed, **options)
+        elif args.command == "mcp-tools":
+            client = MCPClient(load_profile(args.profile) if args.profile else default_profile())
+            output = {"server": client.profile.name, "tools": client.discover()}
         elif args.command == "runs":
             output = {
                 "runs": [
@@ -117,7 +148,7 @@ def main():
             else:
                 output = {"report": str(path / "report.md"), "json": str(path / "report.json")}
         print(json.dumps(output, indent=2))
-        return 1 if output.get("status") in {"failed", "cancelled"} else 0
+        return 1 if output.get("status") in {"failed", "cancelled", "incomplete"} else 0
     except Exception as exc:
         message = (
             str(exc) if isinstance(exc, (FileNotFoundError, RuntimeError, ScopeError)) else type(exc).__name__

@@ -1,6 +1,8 @@
 # Architecture
 
-Status: target architecture with an executable MVP. The current capability boundary is documented in README.md. The Textual TUI and CLI share the same controller. Native scoped HTTP checks, isolated offline scanners, typed provider clients, evidence storage, and local model adapters are implemented. Network-enabled third-party scanner workers and the external CVE MCP sidecar remain deferred.
+Status: implemented isolated code agent plus a broader target architecture. The current capability boundary is documented in README.md and [isolated-agent.md](isolated-agent.md). Textual and CLI now run a schema-validated model/tool loop, a separate local coder, offline code execution, pytest, Bandit, and restricted external MCP. Native scoped HTTP checks and the deterministic engagement audit remain available separately. Network-enabled third-party scanners and the external CVE MCP sidecar remain deferred.
+
+The sections below describe the broader engagement architecture. Its network gateways, full finding-confirmation loop and scanner inventory must not be confused with the implemented offline code agent. The exact shipped boundary, tool names, resource limits, artifact format and continuation behavior are specified in [isolated-agent.md](isolated-agent.md).
 
 ## Product boundary
 
@@ -36,7 +38,7 @@ Start with one controller and sequential model stages. Multiple specialist roles
 
 ## Agent loop
 
-The MVP runs deterministic audit stages and collects model explanations. The expanded proposal/execution cycle below is the target design; current model actions are only `explain` and `review_evidence` and cannot invoke scanners. Completed reports can be reopened; resuming interrupted execution is not implemented.
+The legacy engagement audit runs deterministic stages and collects `explain`/`review_evidence` proposals. The default isolated agent separately executes validated workspace, coder, Python, pytest, Bandit, security-review and MCP actions. Its saved files can seed a new container; interrupted actions are never replayed automatically. The expanded engagement proposal cycle below remains the target for broader network auditing.
 
 `draft → authorized → inventory → hypotheses → validation → report → complete`
 

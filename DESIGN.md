@@ -32,7 +32,8 @@ Inherit the user's terminal monospace font. Do not download fonts or images. Use
 - A bottom input accepts prose and explicit slash commands. Tab completes commands; up/down recall in-memory prompt history. Enter submits. Escape requests cancellation. Ctrl+L focuses input. Ctrl+Q exits after stopping any active task.
 - First launch explains `/new`, `/open`, and `/demo`. New scopes open a form; authorization displays the exact contract before a separate operator action.
 - Findings use a table and a detail pane showing provenance, evidence identifiers, and remediation. Selecting a finding supplies context for the next chat question.
-- A run starts only through an explicit operator command or button. Model replies are advisory and cannot execute tools or alter scope.
+- Plain text starts the isolated agent. Show its current tool/model and keep the offline code boundary visible. `/chat` is explicitly advisory. Tool calls cannot alter scope, MCP policy or host access.
+- `/import` copies a selected project; `/diff` previews exported modifications. Agent `/resume` restores verified files for a new container; `/reset` starts empty. Keep these controls distinct from the legacy engagement audit commands.
 - Keep terminal interaction responsive with background workers. Stream chat output, expose current audit stage, and preserve completed reports under the existing private run directory.
 - Test at 140×44 and 80×24 cells with Textual Pilot, including form submission, cancellation, resume, and the isolated demo.
 

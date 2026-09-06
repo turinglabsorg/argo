@@ -1,0 +1,9 @@
+**
+!worker/
+!worker/Dockerfile
+!worker/requirements.txt
+!src/
+!src/argo/
+!src/argo/data/
+!src/argo/data/agent/
+!src/argo/data/agent/*.py

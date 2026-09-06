@@ -154,9 +154,9 @@ def read_evidence(path: Path, identity: str) -> dict:
     descriptor = os.open(path / "evidence" / f"{identity}.json", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     with os.fdopen(descriptor, "rb") as stream:
         info = os.fstat(stream.fileno())
-        if not stat.S_ISREG(info.st_mode) or info.st_size > 1024**2:
+        if not stat.S_ISREG(info.st_mode) or info.st_size > 8 * 1024**2:
             raise ValueError("Evidence is not a bounded regular file")
-        content = stream.read(1024**2 + 1)
+        content = stream.read(8 * 1024**2 + 1)
     if hashlib.sha256(content.removesuffix(b"\n")).hexdigest() != identity:
         raise ValueError("Evidence integrity check failed")
     return clean(json.loads(content))

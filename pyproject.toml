@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "argo-security"
-version = "0.1.0"
-description = "Local evidence-driven security audits and scoped web testing"
+version = "0.2.0"
+description = "Isolated security agent with local models, code editing, tests and MCP"
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"

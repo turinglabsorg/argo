@@ -1,6 +1,6 @@
 # Local validation — 2026-09-06
 
-This records smoke tests of the executable MVP, not a model benchmark or a claim of complete pentest coverage. No third-party target was tested.
+This records smoke tests of Argo 0.2 and the earlier advisory MVP, not a model benchmark or a claim of complete pentest coverage. No third-party target was tested. The external MCP checks used public documentation tools.
 
 ## Environment
 
@@ -9,7 +9,53 @@ This records smoke tests of the executable MVP, not a model benchmark or a claim
 - Ollama bound to loopback with cloud mode disabled, one loaded model, and sequential inference. The Foundation-Sec runtime reported its model allocation in GPU memory.
 - Dependencies are resolved in `uv.lock`; scanner image digests are in `src/argo/data/scanners.lock.json`.
 
-## Installed specialist models
+## Isolated coding agent — 0.2
+
+Three actual local models were exercised together: Foundation-Sec and VulnLLM for security reviews, and `argo-coder:30b-a3b` for coordination and separate code-edit calls. The coder is Qwen3-Coder-30B-A3B-Instruct, using the pinned Unsloth Q4_K_M conversion. Its GGUF SHA-256 is `fadc3e5f8d42bf7e894a785b05082e47daee4df26680389817e2093056f088ad` and its Ollama manifest digest is `e632d51872729262097a1f69a000abe6ede221faaccc05f5d7b0dbcbed24edbd`. Ollama reported an 18.96 GiB GPU allocation. The conversion requires its own evaluation; upstream benchmark scores are not inherited.
+
+The final worker image on this machine was `sha256:ff61ca09d173a113ccf968aaff1bae3b81c95ea62a8d4a045f244a8197c84e74`. Build inputs and dependencies are pinned in `worker/`; image identity is recorded by the installer. All generated code and independent implementation checks below ran in fresh offline containers.
+
+### Autonomous vulnerability repair
+
+Command: `argo agent-demo`. Run ID: `11eeadf664ab4d9b9f162461e081b828`.
+
+The agent made 12 actual tool calls before finishing: source inspection, a live DeepWiki MCP call, both specialist model reviews, Bandit, generated pytest regressions, implementation repair and retesting.
+
+- Bandit reported B608 before the fix and no findings after it.
+- Before the fix, pytest reported **1 failed, 2 passed**: the injection input returned both users instead of an empty result.
+- Qwen3-Coder changed the interpolated SQL to a parameterized SQLite query.
+- After the fix, the same tests reported **3 passed**. Their SHA-256 remained `4a61264ae45f674a79a9fe55ed346f99425f82c3d30899cd1105db72434617f5`.
+- A separate deterministic verifier checked the positive case, missing user, apostrophe handling, two injection inputs and unchanged database row count. It passed in a new container.
+- The verifier confirmed that production code changed and the failing/passing test file was unchanged. Its result gates the saved completion status.
+- All **18 evidence files** passed the manifest integrity check.
+
+This demonstrates repair of the owned SQLite fixture, not arbitrary application security. Model review output remains suspected until independently validated.
+
+### Code creation and TUI continuation
+
+Run `2d09c28e0b6c4f91be826db40bf5122a` created `normalize.py` and separate pytest tests using actual Qwen3-Coder calls. All **7 tests passed**; a separate container checked whitespace, casing, empty strings and invalid types. All 7 evidence files verified.
+
+The actual Textual event loop then restored that run and received an Italian request to rename the function parameter to `value`, support keyword invocation, add a regression and rerun tests. Run `04c5925c5553427cbcbbbab07e1a5336` completed with **8 tests passed**. A fresh container independently verified keyword and positional calls and invalid types. All 10 evidence files verified; the original run's source remained unchanged. Wide and narrow terminal captures are in `docs/assets/agent.svg` and `docs/assets/agent-small.svg`.
+
+Initial experiments with a smaller Qwen2.5-Coder 7B were not selected. An earlier coordinator implementation lost task context and repeated reads; the current implementation retains bounded assistant/tool turns and forwards the original operator task and test feedback to the coder. A 30-second read timeout also failed during a cold Qwen3 load; the validated configuration uses 60 seconds with a separate 300-second generation budget. These successful smoke runs are not a reliability benchmark.
+
+### Isolation, MCP and integration checks
+
+- Real worker inspection confirmed no host mounts, no network, user 65532, read-only root, dropped capabilities and no privileged/host-PID mode.
+- Host canary files, the Docker socket, root writes and connections to public, metadata and host gateway addresses were unavailable. Symlink read/write escapes were rejected.
+- Cancellation removed the whole container, including detached descendants. An abruptly killed controller can leave a container; this development sandbox is not a malware-analysis VM.
+- MCP protocol tests covered JSON/SSE responses, sessions, schema intersection, callback rejection and denied arguments/endpoints. Live discovery and `read_wiki_structure` succeeded against public DeepWiki from the separate broker container. The default profile only permits a fixed repository-name enum.
+- TUI integration tests exercise code edits, tests, diffs, verified evidence, workspace continuation, reset and cancellation at 140×44 and 80×24 cells.
+- The final suite contains **85 passing tests**, including real Docker workers/scanners and loopback fixtures. Model/provider contract tests use controlled responses; the live model and MCP runs above are separate.
+- Ruff, structural design validation and source/wheel builds pass. The wheel includes the immutable worker/MCP adapters and TUI assets. The installed terminal command uses the frozen dependency versions.
+
+Cloud models, authenticated or stdio MCP, general remote network scanning and automatic application of patches to original projects remain outside this runtime.
+
+## Earlier advisory MVP validation
+
+The following results describe the preceding read-only audit workflow and its original 59-test suite.
+
+### Installed specialist models
 
 Both GGUF files were downloaded from the revisions in `config/models.lock.json`, verified against the recorded SHA-256, and imported into local Ollama. No general model was used for the final audit or TUI chat checks.
 
@@ -20,7 +66,7 @@ Both GGUF files were downloaded from the revisions in `config/models.lock.json`,
 
 Foundation-Sec uses the official Cisco quantization; VulnLLM uses a community conversion. Their licenses and upstream model cards remain authoritative: [Foundation-Sec](https://huggingface.co/fdtn-ai/Foundation-Sec-8B-Reasoning), [VulnLLM-R](https://huggingface.co/Virtue-AI-HUB/VulnLLM-R-7B).
 
-## Full local audit
+### Full local audit
 
 Command: `argo demo --scanners`.
 
@@ -38,7 +84,7 @@ The fixture supplied a temporary source repository, synthetic package advisory, 
 
 Audit inference used an 8,192-token context, temperature zero, a 1,600-token completion limit, schema-constrained output, and thinking disabled. Finding IDs and evidence references are constrained and validated in code. These timings describe a single fixture run and do not predict other engagements.
 
-## TUI and chat
+### TUI and chat
 
 The Textual interface was exercised through its actual event loop and workers:
 
@@ -53,7 +99,7 @@ Foundation-Sec's imported chat behavior was inconsistent during initial free-tex
 
 Conversation history remains in memory; saved audit reports persist under the private Argo state directory. Reopening a report does not resume an interrupted scanner or restore chat history.
 
-## Automated and packaging checks
+### Automated and packaging checks
 
 - `pytest -q`: **59 passed**. Includes real Docker scanners and loopback HTTP fixtures; provider/model contract tests use controlled responses.
 - `ruff check src tests scripts`: passed.
