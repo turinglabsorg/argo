@@ -1,0 +1,27 @@
+rules:
+  - id: argo-python-sql-interpolation
+    languages: [python]
+    severity: ERROR
+    message: SQL query uses string interpolation; verify input flow and parameterize.
+    metadata:
+      cwe: CWE-89
+    patterns:
+      - pattern-either:
+          - pattern: $CURSOR.execute(f"...")
+          - pattern: $CURSOR.execute($A + $B)
+  - id: argo-python-shell
+    languages: [python]
+    severity: ERROR
+    message: Shell-enabled subprocess; use fixed argument arrays.
+    metadata:
+      cwe: CWE-78
+    pattern: subprocess.$FUNC(..., shell=True, ...)
+  - id: argo-js-eval
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: Dynamic eval call; verify whether untrusted input is reachable.
+    metadata:
+      cwe: CWE-95
+    patterns:
+      - pattern: eval($INPUT)
+      - pattern-not: eval("...")

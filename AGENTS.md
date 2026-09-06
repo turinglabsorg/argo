@@ -1,6 +1,6 @@
 # Argo development instructions
 
-- This is currently a design repository. Clearly distinguish proposed behavior from implemented and runtime-tested behavior.
+- This repository contains an executable MVP and its longer-term architecture. Keep README capabilities and roadmap status aligned with runtime-tested behavior.
 - Keep code, documentation, comments, and commits in English.
 - Follow `docs/architecture.md` for execution boundaries and `docs/roadmap.md` for implementation order.
 - Do not interpret sample targets or a populated JSON file as authorization to run a test.

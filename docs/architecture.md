@@ -1,6 +1,6 @@
 # Architecture
 
-Status: proposed. This document defines the implementation contract, not a deployed system.
+Status: target architecture with an executable MVP. The current capability boundary is documented in README.md. The Textual TUI and CLI share the same controller. Native scoped HTTP checks, isolated offline scanners, typed provider clients, evidence storage, and local model adapters are implemented. Network-enabled third-party scanner workers and the external CVE MCP sidecar remain deferred.
 
 ## Product boundary
 
@@ -36,9 +36,11 @@ Start with one controller and sequential model stages. Multiple specialist roles
 
 ## Agent loop
 
+The MVP runs deterministic audit stages and collects model explanations. The expanded proposal/execution cycle below is the target design; current model actions are only `explain` and `review_evidence` and cannot invoke scanners. Completed reports can be reopened; resuming interrupted execution is not implemented.
+
 `draft → authorized → inventory → hypotheses → validation → report → complete`
 
-`paused`, `cancelled`, and `failed` are durable states. Network failures and unavailable tools must also appear in report coverage.
+`cancelled` and `failed` are durable states. A resumable `paused` state is planned. Network failures and unavailable tools must also appear in report coverage.
 
 1. Parse an engagement, canonicalize targets, and validate authorization and budgets.
 2. Snapshot approved source into a per-run workspace; inventory exact dependency versions, application entry points, and available test fixtures.
@@ -50,7 +52,7 @@ Start with one controller and sequential model stages. Multiple specialist roles
 8. Compare observations with the hypothesis; classify it as suspected, confirmed, rejected, or inconclusive.
 9. Stop on completion, expiry, cancellation, action/request budget exhaustion, or repeated non-progress. Persist resumable state without replaying actions that may have side effects.
 
-Malformed model output receives at most two repair attempts. Repeated invalid proposals pause the model stage. A missing model cannot silently turn a scanner-only run into an AI-verified result.
+Malformed model output receives at most two additional attempts. Repeated invalid proposals produce a partial model result. A missing model cannot silently turn a scanner-only run into an AI-verified result.
 
 ## Engagement and authorization
 
@@ -107,9 +109,9 @@ Business-logic/API testing needs more than scanners: operator-provided API schem
 
 Use native Ollama for Apple Metal acceleration. Keep the initial model context at 8K tokens, load one model at a time, and measure memory pressure and latency on this machine. Larger context is an evaluated configuration change, not an assumed benefit.
 
-Foundation-Sec-8B-Reasoning is the first analyst candidate; VulnLLM-R-7B is a source-review specialist. Compare them against one general instruct/coding baseline with known structured-output behavior. A 14B–32B baseline is an optional later experiment, not an MVP requirement. CyberSecQwen-4B is a possible lightweight CTI classifier. SecAlign is an optional research comparison for hostile-input handling, not the authorization layer.
+Foundation-Sec-8B-Reasoning is the default analyst and VulnLLM-R-7B is the source-review specialist. Both have pinned Q4_K_M artifacts and have completed a local smoke audit. There is no general-model fallback. Additional models and comparative evaluation remain separate experiments.
 
-Do not assume Hugging Face weights are directly runnable in Ollama. Before selecting any artifact, pin its source revision, file hash, quantization, chat template, license reference, context setting, and conversion provenance. Validate extraction of final answers for reasoning models. Test structured action proposals separately from cybersecurity question answering. No model download or local inference benchmark has been performed for this design.
+Do not assume Hugging Face weights are directly runnable in Ollama. Pin source revisions, file hashes, quantization, templates, license references, context settings, and conversion provenance. The selected artifacts are in `config/models.lock.json`; actual smoke results are in `docs/validation.md`. Structured audit proposals use schema-constrained chat with thinking disabled. The TUI uses Foundation-Sec's native role template through Ollama's raw generation endpoint, and Ollama chat for VulnLLM. Tagged reasoning is removed from display. These smoke tests do not establish benchmark accuracy or reliable instruction following for every prompt.
 
 Retrieved code, HTML, scanner output, and MCP responses are untrusted data. Keep instructions and evidence separate, limit response sizes, remove executable formatting from reports, and validate every proposed action independently. A second model or prompt-injection classifier may add a signal but never grants permissions.
 

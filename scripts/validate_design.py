@@ -5,7 +5,6 @@ from pathlib import Path
 
 from jsonschema import Draft202012Validator, FormatChecker
 
-
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -48,7 +47,7 @@ def main():
         raise AssertionError("Upstream source review must name a full commit hash")
 
     links_checked = 0
-    for document in ROOT.rglob("*.md"):
+    for document in [*ROOT.glob("*.md"), *(ROOT / "docs").rglob("*.md")]:
         for target in re.findall(r"\[[^\]]*\]\(([^)]+)\)", document.read_text()):
             if "://" in target or target.startswith("#"):
                 continue
@@ -59,7 +58,7 @@ def main():
 
     print(f"Schema and draft example valid; {len(invalid_cases)} denial fixtures rejected.")
     print(f"Intelligence contract disabled and pinned; {links_checked} local document links valid.")
-    print("Structural validation only; no runtime enforcement or target testing is implemented.")
+    print("Structural validation only; runtime integration tests are separate.")
 
 
 if __name__ == "__main__":

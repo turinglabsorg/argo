@@ -1,0 +1,85 @@
+Screen {
+    background: #201d1d;
+    color: #fdfcfc;
+    scrollbar-color: #514a49;
+    scrollbar-color-hover: #83cec6;
+    scrollbar-color-active: #83cec6;
+    scrollbar-background: #201d1d;
+    scrollbar-background-hover: #201d1d;
+    scrollbar-background-active: #201d1d;
+}
+#brand {
+    height: 3;
+    padding-top: 1;
+    color: #83cec6;
+    text-style: bold;
+    border-bottom: solid #514a49;
+}
+#workspace { height: 1fr; }
+#views { width: 1fr; height: 1fr; }
+TabPane { padding: 0 1; height: 1fr; }
+ContentSwitcher { height: 1fr; }
+Tabs { background: #201d1d; }
+Tab { color: #b4abaa; }
+Tab.-active { color: #fdfcfc; text-style: bold; }
+Underline > .underline--bar { color: #83cec6; background: #201d1d; }
+#conversation { height: 1fr; padding: 1 2; }
+.message { height: auto; margin-bottom: 2; }
+#sidebar {
+    width: 34;
+    padding: 1 2;
+    background: #292525;
+    border-left: solid #514a49;
+}
+.compact #sidebar { display: none; }
+.sidebar-title { color: #b4abaa; text-style: bold; margin-top: 1; margin-bottom: 1; }
+.sidebar-help { color: #b4abaa; margin-top: 2; }
+#scope-summary, #model-summary, #activity { height: auto; margin-bottom: 1; }
+#sidebar Button { width: 100%; margin-top: 1; }
+Button {
+    background: #302c2c;
+    color: #fdfcfc;
+    border: tall #514a49;
+}
+Button.-primary { background: #83cec6; color: #201d1d; border: tall #83cec6; text-style: bold; }
+Button:focus { text-style: bold; border: tall #efbb73; }
+Button:disabled { opacity: 45%; }
+#status { height: 1; color: #b4abaa; padding-left: 2; background: #292525; }
+#prompt {
+    height: 3;
+    margin: 0 1;
+    background: #302c2c;
+    border: tall #514a49;
+}
+Input:focus { border: tall #83cec6; }
+Input { background: #302c2c; color: #fdfcfc; border: tall #514a49; }
+Footer { background: #201d1d; color: #b4abaa; }
+FooterKey > .footer-key--key { background: #302c2c; color: #83cec6; }
+#findings { height: 2fr; }
+#finding-detail { height: 3fr; border: solid #514a49; margin-top: 1; }
+#runs { height: 1fr; }
+DataTable { background: #201d1d; }
+DataTable > .datatable--header { background: #302c2c; color: #b4abaa; }
+DataTable > .datatable--cursor { background: #3b504e; color: #fdfcfc; }
+DataTable > .datatable--odd-row { background: #292525; }
+TextArea { background: #201d1d; color: #fdfcfc; }
+ModalScreen { align: center middle; background: #201d1d 80%; }
+#dialog, #authorization-dialog, #report-dialog {
+    background: #292525;
+    border: solid #83cec6;
+    padding: 1 2;
+    width: 84;
+    max-width: 95%;
+    height: auto;
+    max-height: 95%;
+    overflow-y: auto;
+}
+#authorization-dialog { height: 90%; }
+#authorization-scope { height: 1fr; min-height: 5; margin-bottom: 1; }
+#report-dialog { width: 92%; height: 92%; }
+#report-content { height: 1fr; margin: 1 0; }
+.dialog-title { color: #83cec6; text-style: bold; margin-bottom: 1; }
+.dialog-actions { height: auto; margin-top: 1; }
+.dialog-actions Button { margin-right: 2; }
+.muted { color: #b4abaa; height: auto; }
+#form-error { color: #f28e85; height: auto; }

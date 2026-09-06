@@ -17,3 +17,5 @@ models/
 *.sqlite*
 *.db
 config/*.local.json
+dist/
+*.egg-info/

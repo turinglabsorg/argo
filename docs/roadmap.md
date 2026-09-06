@@ -1,12 +1,14 @@
 # Implementation plan
 
-All runtime milestones below are pending. The design package, draft configuration, and source review are the initial deliverable.
+An executable MVP now covers the Textual TUI, core CLI, authorization binding, source audit, isolated Semgrep/Gitleaks, typed provider clients, local cybersecurity model adapters, a scoped HTTP broker, controlled validation, evidence manifests, reports, and retests. The milestone descriptions below remain the full target; they must not be read as a claim that every acceptance criterion has shipped.
+
+Remaining work includes third-party MCP sidecar activation, network-enabled Nuclei/ZAP workers, authenticated API role matrices, general network discovery, restart/recovery hardening, more lockfile formats, and the larger held-out model evaluation corpus. The first real engagement still requires an operator-selected target.
 
 ## M0 — Deterministic foundation
 
 Build the CLI, engagement loader, canonical scope digest, typed action contracts, state machine, and local evidence store. Use Python 3.12+ with `uv`, Pydantic, SQLite, and an explicit execution supervisor. Create the dependency lockfile when dependencies are selected.
 
-Proposed CLI surface: `argo doctor`, `argo init`, `argo plan`, `argo run`, `argo status`, `argo stop`, `argo report`, and `argo retest`. These commands are not implemented yet.
+Implemented CLI surface: `argo` (interactive TUI), `argo tui`, `argo doctor`, `argo init`, `argo plan`, `argo authorize`, `argo run`, `argo runs`, `argo status`, `argo stop`, `argo report`, `argo verify`, `argo retest`, and `argo demo`.
 
 Acceptance:
 
@@ -78,8 +80,8 @@ Proposed release gates: zero scope or secret-disclosure violations in the bounda
 
 ## Deferred decisions
 
-- Exact GGUF artifacts and general-model baseline: select after artifact review and evaluation.
+- Broader held-out model evaluation: artifacts are now pinned and smoke-tested; release accuracy gates remain unmeasured.
 - First real repository/domain, test accounts, and engagement window: supplied for M4; no current infrastructure is implicitly in scope.
 - Shodan, VirusTotal, GreyNoise, remote models, and additional providers: add only for a concrete workflow and explicit disclosure policy.
 - Browser-driven authenticated flows, smart-contract audits, cloud posture audits, and unrestricted custom PoCs: separate adapters and evaluation tracks.
-- UI/dashboard and packaging as an agent skill: follow a proven CLI workflow; create a project design system before UI implementation.
+- A browser dashboard, ACP server for external frontends such as Toad, and packaging as an agent skill remain future work. The native Textual TUI is implemented; see DESIGN.md.

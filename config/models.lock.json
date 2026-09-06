@@ -1,0 +1,28 @@
+{
+  "models": [
+    {
+      "alias": "argo-foundation-sec:8b",
+      "role": "analyst",
+      "repository": "fdtn-ai/Foundation-Sec-8B-Reasoning-Q4_K_M-GGUF",
+      "revision": "4a04f7b19513ff9f672169b8fe4288000ab87b07",
+      "filename": "foundation-sec-8b-reasoning-q4_k_m.gguf",
+      "size": 4920851232,
+      "sha256": "7a61e41b1ca1b339d41caf3001ea7832469d866e7c52a23980a1e95cbf5cd58b",
+      "quantization": "Q4_K_M",
+      "provenance": "Official Cisco Foundation AI quantization",
+      "upstream": "https://huggingface.co/fdtn-ai/Foundation-Sec-8B-Reasoning"
+    },
+    {
+      "alias": "argo-vulnllm:7b",
+      "role": "source-review",
+      "repository": "mradermacher/VulnLLM-R-7B-GGUF",
+      "revision": "6ce5015efa4210be17c1c3034ba5dd5ca36d0d63",
+      "filename": "VulnLLM-R-7B.Q4_K_M.gguf",
+      "size": 4683074464,
+      "sha256": "22ef4df3a60aa194d85b88808d54b258631aa920d9926a89a3fb353190143817",
+      "quantization": "Q4_K_M",
+      "provenance": "Community quantization by mradermacher; validate separately from upstream BF16 results",
+      "upstream": "https://huggingface.co/Virtue-AI-HUB/VulnLLM-R-7B"
+    }
+  ]
+}

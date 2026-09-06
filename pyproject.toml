@@ -1,0 +1,42 @@
+[build-system]
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "argo-security"
+version = "0.1.0"
+description = "Local evidence-driven security audits and scoped web testing"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+dependencies = [
+    "pydantic>=2.11,<3",
+    "httpx>=0.28,<0.29",
+    "jsonschema[format]>=4.25,<5",
+    "textual>=6.0,<9",
+]
+
+[project.scripts]
+argo = "argo.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4,<9",
+    "pytest-asyncio>=1.1,<2",
+    "ruff>=0.12,<1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/argo"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["live: requires local Docker or Ollama services"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 110
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+ignore = ["E501"]
