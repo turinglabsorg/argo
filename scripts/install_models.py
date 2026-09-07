@@ -16,6 +16,13 @@ def sha256(path):
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
+def cached_artifact(model, destination, ollama_models):
+    for path in (destination / model["filename"], ollama_models / "blobs" / ("sha256-" + model["sha256"])):
+        if not path.is_symlink() and path.is_file() and path.stat().st_size == model["size"] and sha256(path) == model["sha256"]:
+            return path
+    return None
+
+
 def download(url, model, path, parallel=8):
     size = model["size"]
     part_size = 128 * 1024**2
@@ -84,17 +91,24 @@ def main():
     args = parser.parse_args()
     destination = Path.home() / ".argo" / "models"
     destination.mkdir(parents=True, mode=0o700, exist_ok=True)
+    ollama_models = Path(os.environ.get("OLLAMA_MODELS", str(Path.home() / ".ollama" / "models"))).expanduser()
     for model in registry["models"]:
         if args.model and model["alias"] != args.model:
             continue
-        path = destination / model["filename"]
-        if not path.is_file() or sha256(path) != model["sha256"]:
-            if shutil.disk_usage(destination).free < model["size"] * 2 + 5 * 1024**3:
-                raise RuntimeError("Insufficient disk space for model download and Ollama import")
+        path = cached_artifact(model, destination, ollama_models)
+        if path is None:
+            path = destination / model["filename"]
+            if shutil.disk_usage(destination).free < model["size"] * 4 + 5 * 1024**3:
+                raise RuntimeError("Insufficient disk space for download, Ollama conversion and temporary validation copies")
             url = f"https://huggingface.co/{model['repository']}/resolve/{model['revision']}/{model['filename']}"
             print(f"Downloading pinned {model['alias']}", flush=True)
             download(url, model, path, args.parallel)
         print(f"Verified SHA-256: {model['alias']}", flush=True)
+        source_blob = ollama_models / "blobs" / ("sha256-" + model["sha256"])
+        temporary_copies = 2 if path == source_blob else 3
+        storage = ollama_models if ollama_models.is_dir() else path.parent
+        if shutil.disk_usage(storage).free < model["size"] * temporary_copies + 5 * 1024**3:
+            raise RuntimeError("Insufficient disk space for Ollama conversion and temporary validation copies")
         modelfile = destination / (model["alias"].replace(":", "-") + ".Modelfile")
         modelfile.write_text(f"FROM {path}\nPARAMETER num_ctx 8192\nPARAMETER temperature 0\n")
         print(f"Importing {model['alias']} into Ollama", flush=True)

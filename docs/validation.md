@@ -171,3 +171,20 @@ The full local suite passed **138 tests**, including HTTP-to-Docker findings reg
 A live Foundation-Sec source review rendered native reasoning in a headless Textual session before the final JSON answer, with 598 reasoning updates and 355 answer updates across the review. A separate run completed both installed local specialists. Native thinking support does not guarantee reasoning on every prompt, and the installed VulnLLM artifact does not advertise it.
 
 An explicitly authorized local TypeScript backend audit inspected 123 files with offline scanners, passed 60 existing integration tests, and reproduced six targeted security behaviors using copied source, temporary MongoDB, and simulated storage/email boundaries. Static scanner alerts and model conclusions were triaged separately. One Foundation-Sec prompt missed an ownership defect that the integration test demonstrated; VulnLLM described an incorrect traversal condition. These checks validate the integration and the stated test cases, not broad security accuracy. Customer source, keys, reports and screenshots remain outside this repository.
+
+
+## Qwen3.8 and simultaneous local reviews
+
+The final regression suite passed **156 tests** and the source distribution/wheel built successfully. Tests include three concurrent HTTP requests, one-reviewer failure, cancellation during silent loading/reasoning, independent result persistence, retained evidence after partial completion, interleaved TUI states, output tail following with preserved manual scrolling, and verified installer-cache reuse.
+
+The new local alias `argo-qwen:27b` uses the [Heretic ARA variant](https://huggingface.co/trohrbaugh/Qwen3.8-27B-heretic-ara) from the linked comparison, via mradermacher's checksum-pinned Q4_K_M GGUF. Native Ollama 0.33.3 reports qwen35 architecture, 27.3B parameters, thinking/tools/completion support and 262,144 maximum context tokens. Argo serves this reviewer at 32,768 context tokens to leave memory for the other models and applications.
+
+An initial import exhausted disk space during Ollama's temporary compatibility validation. Reusing the verified source blob without its duplicate download completed successfully. The installer now checks conversion space and can reuse checksum-verified source blobs; no installed model was removed.
+
+On the 64 GiB Apple Silicon Mac, Qwen alone completed four owned executable controls through the TUI in **287.65 seconds**, with **722 reasoning updates** and **204 answer updates**. It identified the two planted defects (SQL injection and missing object ownership) and correctly described the two fixed controls. Foundation-Sec and VulnLLM also recognized both defects without flagging the fixed controls; Foundation duplicated its two observations. These four tiny cases do not establish broader security accuracy.
+
+Actual Argo run **f92408b3acee4d15a322eb3ae839c197** used the operator's Muse Spark/OpenRouter profile with Hush-backed authentication. Muse selected `security.review_all`, the three local models reviewed the same four-file snapshot, and Muse then synthesized their results. All three returned valid responses. Six suspected observations were saved (three opinions on the same two defects); there were no coverage gaps, no file changes, and the evidence manifest verified.
+
+The three response intervals overlapped for **28.43 seconds**. Native Ollama reported all three models fully GPU-offloaded, with **32.44 GB aggregate model GPU allocation**: Qwen 19.22 GB, Foundation-Sec 7.30 GB and VulnLLM 5.91 GB. System swap usage remained at its pre-existing **171.62 MB** throughout the sampled run. Completed models were subsequently unloaded by Ollama's idle timer.
+
+The full coordinated run took **1,016.14 seconds** (about 17 minutes); Qwen produced **3,310 reasoning updates**, more than its initial standalone trial. This validates concurrent operation and memory fit under the measured configuration, not a speedup. Output lengths and stochastic reasoning differ between trials, and TUI/coordination time is included. Live captures and detailed measurements remain in the operator's private evaluation directory.

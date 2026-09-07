@@ -5,7 +5,7 @@ import pytest
 from test_providers import endpoint
 from textual.widgets import Static, TabbedContent, TextArea
 
-from argo.agent_models import ANALYST, REVIEWER, LocalModelError, review
+from argo.agent_models import ANALYST, QWEN, REVIEWER, SPECIALISTS, LocalModelError, review, review_team
 from argo.context_budget import ModelLimits
 from argo.controller import Cancelled
 from argo.model_activity import analysis_text
@@ -13,7 +13,7 @@ from argo.providers import CodingProfile, save_profile
 from argo.tui import COMMANDS, LOGO, ArgoApp
 
 
-@pytest.mark.parametrize('model', [ANALYST, REVIEWER])
+@pytest.mark.parametrize('model', [ANALYST, REVIEWER, QWEN])
 def test_local_review_streams_user_facing_fields_and_batches_long_source(monkeypatch, model):
     result = {'summary': 'Review complete', 'suspected_findings': [{'path': 'app.py', 'issue': 'Unbound SQL value', 'remediation': 'Bind query parameters'}]}
     with endpoint('ollama', replies=[result] * 10) as (profile, records):
@@ -112,6 +112,130 @@ def test_cancellation_during_native_reasoning(monkeypatch):
             review(ANALYST, {'app.py': 'value = 1'}, check, on_reasoning=thinking)
 
 
+@pytest.mark.parametrize('phase', ['loading', 'reasoning'])
+def test_slow_qwen_can_be_cancelled_without_waiting_for_a_token(monkeypatch, phase):
+    waiting, released = threading.Event(), threading.Event()
+
+    def replies(_):
+        if phase == 'loading':
+            waiting.set()
+            assert released.wait(3)
+        return {'summary': 'Unused', 'suspected_findings': []}
+
+    def chunks(_):
+        if phase == 'reasoning':
+            yield {'message': {'thinking': 'Review started'}, 'done': False}
+            waiting.set()
+            assert released.wait(3)
+
+    def check():
+        if waiting.is_set():
+            raise Cancelled('Cancelled while waiting for Ollama')
+
+    with endpoint('ollama', replies=replies, chunks=chunks) as (profile, _):
+        monkeypatch.setattr('argo.agent_models.ENDPOINT', profile.base_url)
+        try:
+            with pytest.raises(Cancelled, match='waiting for Ollama'):
+                review(QWEN, {'app.py': 'value = 1'}, check)
+        finally:
+            released.set()
+
+
+def test_qwen_reserves_context_for_longer_reasoning_and_retries_only_truncation(monkeypatch):
+    final = {'summary': 'Reviewed', 'suspected_findings': []}
+
+    def chunks(body):
+        assert body['model'] == QWEN and body['think'] is True
+        assert body['options']['num_ctx'] == 32768
+        assert body['options']['temperature'] == 0.6
+        truncated = body['options']['num_predict'] == 8192
+        yield {'message': {'content': json.dumps(final)}, 'done': True, 'done_reason': 'length' if truncated else 'stop'}
+
+    with endpoint('ollama', chunks=chunks) as (profile, records):
+        monkeypatch.setattr('argo.agent_models.ENDPOINT', profile.base_url)
+        statuses = []
+        result = review(QWEN, {'app.py': 'value = 1'}, on_status=statuses.append)
+    requests = [r['body'] for r in records if r['path'] == '/api/chat']
+    assert result['summary'] == 'Reviewed'
+    assert [r['options']['num_predict'] for r in requests] == [8192, 16384]
+    assert requests[0]['messages'] == requests[1]['messages']
+    assert any('16,384' in status for status in statuses)
+
+
+@pytest.mark.parametrize('model,accepted', [(ANALYST, False), (QWEN, True)])
+def test_qwen_transport_accepts_longer_reasoning_without_expanding_other_models(monkeypatch, model, accepted):
+    final = {'summary': 'Reviewed', 'suspected_findings': []}
+    chunks = [{'message': {'thinking': 'a' * (2 * 1024**2)}, 'done': False}, {'message': {'content': json.dumps(final)}, 'done': True}]
+    thinking = []
+    with endpoint('ollama', chunks=chunks) as (profile, _):
+        monkeypatch.setattr('argo.agent_models.ENDPOINT', profile.base_url)
+        if accepted:
+            assert review(model, {'app.py': 'value = 1'}, on_reasoning=thinking.append)['summary'] == 'Reviewed'
+            assert max(map(len, thinking)) <= 16000
+        else:
+            with pytest.raises(LocalModelError, match='2 MiB'):
+                review(model, {'app.py': 'value = 1'})
+
+
+def test_review_team_starts_three_requests_and_isolates_one_failure(monkeypatch):
+    barrier = threading.Barrier(3, timeout=3)
+    owner = threading.get_ident()
+    completed, updates = [], []
+
+    def chunks(body):
+        barrier.wait()
+        if body['model'] == REVIEWER:
+            yield {'error': 'Internal details must stay private'}
+        else:
+            yield {'message': {'thinking': 'Reviewing the snapshot'}, 'done': False}
+            yield {'message': {'content': json.dumps({'summary': body['model'], 'suspected_findings': []})}, 'done': True}
+
+    def progress(model, **details):
+        assert threading.get_ident() == owner
+        updates.append((model, details))
+
+    def result(model, value):
+        assert threading.get_ident() == owner
+        completed.append(value)
+
+    with endpoint('ollama', chunks=chunks) as (profile, records):
+        monkeypatch.setattr('argo.agent_models.ENDPOINT', profile.base_url)
+        results = review_team({'app.py': 'value = 1'}, on_progress=progress, on_result=result)
+    assert [r['model'] for r in results] == list(SPECIALISTS.values())
+    assert len(completed) == 3 and len([r for r in records if r['path'] == '/api/chat']) == 3
+    assert sum(r['status'] == 'complete' for r in results) == 2
+    assert results[1]['status'] == 'failed' and 'Internal details' not in str(results)
+    assert {model for model, _ in updates} == set(SPECIALISTS.values())
+
+
+def test_review_team_cancels_silent_workers_and_keeps_completed_results(monkeypatch):
+    completed, released = threading.Event(), threading.Event()
+    results = []
+
+    def chunks(body):
+        if body['model'] != ANALYST:
+            assert released.wait(3)
+            return
+        yield {'message': {'content': json.dumps({'summary': 'Completed first', 'suspected_findings': []})}, 'done': True}
+
+    def check():
+        if completed.is_set():
+            raise Cancelled('Stop remaining reviews')
+
+    def result(model, value):
+        results.append(value)
+        completed.set()
+
+    with endpoint('ollama', chunks=chunks) as (profile, _):
+        monkeypatch.setattr('argo.agent_models.ENDPOINT', profile.base_url)
+        try:
+            with pytest.raises(Cancelled, match='remaining reviews'):
+                review_team({'app.py': 'value = 1'}, check, on_result=result)
+        finally:
+            released.set()
+    assert [r['model'] for r in results] == [ANALYST]
+
+
 def test_local_review_cancellation_interrupts_before_next_batch(monkeypatch):
     requests = []
     def respond(*args, **kwargs):
@@ -140,7 +264,8 @@ async def test_welcome_models_live_activity_and_cancellation(tmp_path, monkeypat
         assert LOGO in str(welcome.render())
         assert welcome.region.bottom <= app.query_one('#status').region.y
         roster = str(app.query_one('#model-roster', Static).render())
-        assert all(label in roster for label in ['Muse Spark', 'Foundation-Sec', 'VulnLLM-R'])
+        assert all(label in roster for label in ['Muse Spark', 'Foundation-Sec', 'VulnLLM-R', 'Qwen3.8 27B'])
+        assert app.query_one('#model-roster', Static).region.height == (2 if size[0] == 80 else 1)
         assert '/agent-demo' not in COMMANDS
         await pilot.press('f3')
         assert app.query_one('#views', TabbedContent).active == 'models-tab'
@@ -162,3 +287,53 @@ async def test_welcome_models_live_activity_and_cancellation(tmp_path, monkeypat
         app.finish()
         assert app.model_activity[REVIEWER]['state'] == 'Stopped'
         assert '1,048,576' in str(app.query_one('#coding-activity', Static).render())
+        app.progress({'run_id': 'a' * 32, 'stage': 'security.review', 'model': QWEN, 'reasoning': 'Inspecting object ownership'})
+        app.progress({'run_id': 'a' * 32, 'stage': 'security.review', 'model': QWEN, 'text': 'Suspected object access issue', 'provisional': False})
+        assert 'Inspecting object ownership' in app.query_one('#qwen-output', TextArea).text
+        assert 'Suspected object access issue' in app.query_one('#qwen-output', TextArea).text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('size', [(80, 24), (140, 44)])
+async def test_interleaved_reviewers_keep_independent_live_widgets(tmp_path, monkeypatch, size):
+    monkeypatch.setattr('argo.tui.doctor', lambda: {'ollama': {'status': 'ready', 'local_models': []}})
+    monkeypatch.setattr('argo.tui.model_limits', lambda *_: ModelLimits())
+    app = ArgoApp(tmp_path / 'runs', project=None, settings_path=tmp_path / 'models.json')
+    async with app.run_test(size=size) as pilot:
+        await pilot.pause()
+        app.begin('Parallel review')
+        for model in SPECIALISTS.values():
+            app.progress({'run_id': 'a' * 32, 'stage': 'security.review', 'model': model})
+        for index in range(4):
+            for model in SPECIALISTS.values():
+                app.progress({'run_id': 'a' * 32, 'stage': 'security.review', 'model': model, 'text': f'Observation {index}', 'provisional': True})
+        assert all(app.model_activity[model]['state'] == 'Working' for model in SPECIALISTS.values())
+        assert len(app.model_messages) == 3
+        assert len([entry for entry in app.transcript if 'provisional analysis' in entry[0]]) == 3
+        app.progress({'run_id': 'a' * 32, 'stage': 'security.review', 'model': ANALYST, 'text': 'Completed', 'provisional': False})
+        assert app.model_activity[REVIEWER]['state'] == app.model_activity[QWEN]['state'] == 'Working'
+        app.cancel_event.set()
+        app.finish()
+        assert app.model_activity[ANALYST]['state'] == 'Response complete'
+        assert app.model_activity[REVIEWER]['state'] == app.model_activity[QWEN]['state'] == 'Stopped'
+
+
+@pytest.mark.asyncio
+async def test_live_reasoning_follows_tail_but_preserves_manual_scrolling(tmp_path, monkeypatch):
+    monkeypatch.setattr('argo.tui.doctor', lambda: {'ollama': {'status': 'ready', 'local_models': []}})
+    monkeypatch.setattr('argo.tui.model_limits', lambda *_: ModelLimits())
+    app = ArgoApp(tmp_path / 'runs', project=None, settings_path=tmp_path / 'models.json')
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        await pilot.press('f3')
+        app.begin('Review')
+        output = app.query_one('#qwen-output', TextArea)
+        event = {'run_id': 'a' * 32, 'stage': 'security.review', 'model': QWEN}
+        app.progress({**event, 'reasoning': '\n'.join(f'Check {index}' for index in range(40))})
+        await pilot.pause()
+        assert output.scroll_y > 0 and output.scroll_y == output.max_scroll_y
+        output.scroll_home(animate=False)
+        await pilot.pause()
+        app.progress({**event, 'reasoning': '\n'.join(f'Check {index}' for index in range(50))})
+        await pilot.pause()
+        assert output.scroll_y == 0

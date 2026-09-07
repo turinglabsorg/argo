@@ -26,7 +26,7 @@ from textual.widgets import (
 
 from argo.agent import import_sources, restore, run_agent
 from argo.agent_findings import load_agent_findings
-from argo.agent_models import ANALYST, REVIEWER
+from argo.agent_models import ANALYST, QWEN, REVIEWER, SPECIALISTS
 from argo.chat import answer, display_text
 from argo.context_budget import ModelLimits
 from argo.contracts import Actions, Engagement, Scope
@@ -317,7 +317,7 @@ class ArgoApp(App):
                 with TabPane("Models", id="models-tab"):
                     with VerticalScroll(id="models-feed"):
                         yield Static("All model roles · live responses from local analysis", classes="muted")
-                        for role in ("coding", "foundation", "vulnllm"):
+                        for role in ("coding", *SPECIALISTS):
                             with Vertical(classes="model-card"):
                                 yield Static("", id=role + "-identity", classes="model-identity", markup=False)
                                 yield Static("", id=role + "-activity", classes="model-state", markup=False)
@@ -444,15 +444,21 @@ class ArgoApp(App):
             output.set_class(not (activity.get("text") or activity.get("reasoning")), "empty-output")
             text = display_text("\n\n".join(filter(None, ["Reasoning\n" + activity["reasoning"] if activity.get("reasoning") else "", activity.get("text")])) or activity.get("waiting") or "Called when needed by the task. No response yet.")
             if output.text != text:
+                offset = output.scroll_y
+                follow = offset >= output.max_scroll_y - 1
                 output.load_text(text)
+                if follow:
+                    self.call_after_refresh(output.scroll_end, animate=False, immediate=True)
+                else:
+                    self.call_after_refresh(output.scroll_to, y=offset, animate=False, immediate=True)
         self.ui("#model-summary", Static).update(display_text("\n\n".join(rows)))
         self.ui("#model-roster", Static).update(display_text("  " + "  /  ".join(self.model_label(model) for _, model, _ in self.model_roles())))
 
     def model_roles(self):
-        return [("coding", self.coding.model, "Coding & coordination"), ("foundation", ANALYST, "Security analysis"), ("vulnllm", REVIEWER, "Vulnerability review")]
+        return [("coding", self.coding.model, "Coding & coordination"), ("foundation", ANALYST, "Security analysis"), ("vulnllm", REVIEWER, "Vulnerability review"), ("qwen", QWEN, "Deep review · experimental")]
 
     def model_label(self, model):
-        return {ANALYST: "Foundation-Sec 8B", REVIEWER: "VulnLLM-R 7B", "meta/muse-spark-1.3-contributor": "Muse Spark 1.3 Contributor"}.get(model, model.rsplit("/", 1)[-1])
+        return {ANALYST: "Foundation-Sec 8B", REVIEWER: "VulnLLM-R 7B", QWEN: "Qwen3.8 27B", "meta/muse-spark-1.3-contributor": "Muse Spark 1.3 Contributor"}.get(model, model.rsplit("/", 1)[-1])
 
     @work(thread=True, exit_on_error=False)
     def check_model_limits(self, profile):
@@ -661,8 +667,9 @@ class ArgoApp(App):
         self.refresh_models()
 
     def finish(self):
-        if self.active_model in self.model_activity and self.model_activity[self.active_model]["state"] == "Working":
-            self.model_activity[self.active_model]["state"] = "Stopped" if self.cancel_event.is_set() else "Finished"
+        for activity in self.model_activity.values():
+            if activity.get("state") == "Working":
+                activity["state"] = "Stopped" if self.cancel_event.is_set() else "Finished"
         self.active_model = None
         self.busy = False
         self.streaming = None
@@ -690,11 +697,6 @@ class ArgoApp(App):
             self.model_update(data["model"], data["stage"], data.get("text"), data.get("provisional"), data.get("error", False), data.get("reasoning"), data.get("status"))
 
     def model_update(self, model, stage, text=None, provisional=None, error=False, reasoning=None, status=None):
-        if self.active_model != model:
-            previous = self.model_activity.get(self.active_model, {})
-            if previous.get("state") == "Working":
-                previous["state"] = "Finished"
-            self.model_messages.pop(model, None)
         self.active_model = model
         activity = self.model_activity.setdefault(model, {})
         if text is None and reasoning is None and status is None and stage in {"security.review", "analysis"}:
@@ -737,10 +739,10 @@ class ArgoApp(App):
         self.call_after_refresh(self.ui("#conversation", VerticalScroll).scroll_end, animate=False)
 
     def refresh_model_wait(self):
-        activity = self.model_activity.get(self.active_model, {})
-        if activity.get("state") == "Working" and activity.get("waiting"):
-            elapsed = int(time.monotonic() - activity["started"])
-            self.render_model_output(self.active_model, self.model_label(self.active_model), f"{activity['waiting']} · {elapsed}s")
+        for model, activity in self.model_activity.items():
+            if activity.get("state") == "Working" and activity.get("waiting"):
+                elapsed = int(time.monotonic() - activity["started"])
+                self.render_model_output(model, self.model_label(model), f"{activity['waiting']} · {elapsed}s")
 
     @work(thread=True, exit_on_error=False)
     def audit(self, command, models, scanners, previous):
@@ -994,7 +996,8 @@ class ArgoApp(App):
             for analysis in analyses:
                 if analysis.get("model"):
                     activity = self.model_activity.setdefault(analysis["model"], {})
-                    activity.update(state="Saved response", stage="Security analysis", text=analysis_text(json.dumps(analysis)))
+                    failed = analysis.get("status") == "failed"
+                    activity.update(state="Error" if failed else "Saved response", stage="Security analysis", text=analysis.get("error", "") if failed else analysis_text(json.dumps(analysis)))
             self.refresh_models()
             self.report_data = report
             self.current_run = path

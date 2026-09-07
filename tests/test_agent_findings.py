@@ -1,4 +1,5 @@
 import json
+import threading
 from pathlib import Path
 
 import pytest
@@ -7,6 +8,7 @@ from textual.widgets import DataTable, TextArea
 
 from argo.agent import run_agent
 from argo.agent_findings import load_agent_findings, tool_findings
+from argo.agent_models import QWEN, REVIEWER, SPECIALISTS
 from argo.context_budget import ModelLimits
 from argo.evidence import EvidenceStore, read_state, verify
 from argo.tui import ArgoApp
@@ -72,6 +74,60 @@ def test_record_findings_over_http_persists_reports_and_live_progress(tmp_path, 
     if not invalid:
         assert report['findings'][0]['status'] == 'suspected'
         assert 'Ownership check missing' in (path / 'report.md').read_text()
+    assert verify(path)['status'] == 'verified'
+
+
+@pytest.mark.live
+@pytest.mark.parametrize('model', ['qwen', 'unconfigured'])
+def test_third_reviewer_routes_over_http_and_persists_suspected_findings(tmp_path, monkeypatch, model):
+    calls = []
+
+    def local_reply(body):
+        calls.append(body)
+        return {'summary': 'Ownership must be checked', 'suspected_findings': [{'path': 'app.py', 'issue': 'Missing ownership check', 'remediation': 'Verify the owner'}]}
+
+    actions = [{'action': 'security.review', 'parameters': {'model': model, 'paths': ['app.py']}}, {'action': 'finish', 'parameters': {'summary': 'Review complete'}}]
+    with endpoint('ollama', replies=local_reply) as (local, _), endpoint('openai', replies=actions) as (coding, _):
+        monkeypatch.setattr('argo.agent_models.ENDPOINT', local.base_url)
+        result = run_agent('Review using Qwen, without edits', tmp_path, seed={'app.py': 'value = 1'}, coding=coding, use_mcp=False, max_steps=2)
+    path = Path(result['report']).parent
+    report = json.loads((path / 'report.json').read_text())
+    assert QWEN in report['models']['security']
+    if model == 'qwen':
+        assert len(calls) == 1 and calls[0]['model'] == QWEN
+        assert len(report['findings']) == 1
+        assert report['findings'][0]['status'] == 'suspected'
+        assert report['tools'][0]['model'] == QWEN
+    else:
+        assert calls == [] and report['findings'] == []
+    assert verify(path)['status'] == 'verified'
+
+
+@pytest.mark.live
+@pytest.mark.parametrize('failed', [False, True])
+def test_parallel_review_saves_independent_evidence_and_coverage_gaps(tmp_path, monkeypatch, failed):
+    barrier = threading.Barrier(3, timeout=3)
+
+    def chunks(body):
+        barrier.wait()
+        if failed and body['model'] == REVIEWER:
+            yield {'error': 'Private internal failure'}
+            return
+        result = {'summary': 'Review complete', 'suspected_findings': [{'path': 'app.py', 'issue': 'Observation from ' + body['model'], 'remediation': 'Verify ownership'}]}
+        yield {'message': {'content': json.dumps(result)}, 'done': True}
+
+    actions = [{'action': 'security.review_all', 'parameters': {'paths': ['app.py']}}, {'action': 'finish', 'parameters': {'summary': 'Compared reviewer responses'}}]
+    with endpoint('ollama', chunks=chunks) as (local, _), endpoint('openai', replies=actions) as (coding, _):
+        monkeypatch.setattr('argo.agent_models.ENDPOINT', local.base_url)
+        result = run_agent('Review with all three models concurrently', tmp_path, seed={'app.py': 'value = 1'}, coding=coding, use_mcp=False, max_steps=2)
+    path = Path(result['report']).parent
+    report = json.loads((path / 'report.json').read_text())
+    individual = [r for r in report['tools'] if r['tool'] == 'security.review']
+    assert {r['model'] for r in individual} == set(SPECIALISTS.values())
+    assert len(report['findings']) == (2 if failed else 3)
+    assert len(report['coverage_gaps']) == (1 if failed else 0)
+    assert all(f['status'] == 'suspected' for f in report['findings'])
+    assert {f['evidence_ids'][0] for f in report['findings']} <= {r['evidence_id'] for r in individual}
     assert verify(path)['status'] == 'verified'
 
 

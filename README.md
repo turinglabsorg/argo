@@ -4,7 +4,7 @@ Review code. Investigate security issues. Apply fixes and verify them.
 
 Argo is a terminal agent with specialist local security models and your choice of local or remote coding endpoint. It edits the project you open and executes Python tests in Docker.
 
-Launch Argo from a project directory: that directory is mounted read/write, and edits immediately change its files. F2 or /model selects any model ID through an Ollama, OpenAI-compatible or Anthropic-compatible endpoint. The selected model coordinates tools and writes code. Optional local Foundation-Sec and VulnLLM provide specialist reviews.
+Launch Argo from a project directory: that directory is mounted read/write, and edits immediately change its files. F2 or /model selects any model ID through an Ollama, OpenAI-compatible or Anthropic-compatible endpoint. The selected model coordinates tools and writes code. Optional local Foundation-Sec, VulnLLM and Qwen3.8 27B provide independent reviews, individually or in parallel.
 
 Code executes in a non-root, offline container with only the selected project mounted. Provider credentials, the Docker socket and other host directories are not mounted. Files inside the selected project are accessible to its code. A separate immutable broker connects to configured remote MCP tools.
 
@@ -31,13 +31,18 @@ To install or resume only the coder:
 
     uv run python scripts/install_models.py --model argo-coder:30b-a3b
 
-The installer verifies the pinned GGUF hashes. The --parallel option accepts 1–32 download connections. Local aliases are defaults, not an allowlist for coding:
+The installer verifies the pinned GGUF hashes and can reuse a verified source blob already in native Ollama storage (`OLLAMA_MODELS` or `~/.ollama/models`). New downloads reserve room for four model-sized copies plus 5 GiB because Ollama conversion and validation can create temporary duplicates. The --parallel option accepts 1–32 download connections. Local aliases are defaults, not an allowlist for coding:
 
 | Alias | Model | Role |
 | --- | --- | --- |
 | argo-coder:30b-a3b | Qwen3-Coder-30B-A3B-Instruct, Unsloth Q4_K_M | Default coding and coordination |
 | argo-foundation-sec:8b | Foundation-Sec-8B-Reasoning, official Q4_K_M | Optional security analysis |
 | argo-vulnllm:7b | VulnLLM-R-7B, community Q4_K_M | Optional source review |
+| argo-qwen:27b | Qwen3.8-27B Heretic ARA, community Q4_K_M | Experimental deep review |
+
+Install only the third reviewer with `uv run python scripts/install_models.py --model argo-qwen:27b`. It downloads a checksum-pinned 16.8 GB GGUF.
+
+Ask Argo to “review these files with all three local models in parallel” to use `security.review_all`, or name Qwen for an individual `security.review`. The reviewers receive the same read-only source snapshot; the selected coding model compares their responses and performs any authorized edits. Ollama may queue requests when memory is insufficient. Completed reviews are saved independently, including when another reviewer fails or is cancelled.
 
 See [model provenance](config/models.lock.json). The legacy audit/chat commands retain local specialist adapters. Remote coding does not require the local models or a running Ollama service.
 
@@ -111,7 +116,7 @@ The TUI uses [Textual](https://github.com/Textualize/textual) under MIT.
 | Service readiness | /doctor |
 | Stop active work | Escape or /stop |
 
-Tab completes commands; up/down recall prompts. Ctrl+L focuses input, Ctrl+R opens runs, F1 shows help, and Ctrl+Q stops work before closing. The sidebar hides below 100 columns. All three models remain visible in the header; F3 opens their roles, activity and live responses. Local source reviews stream exposed reasoning separately from provisional analysis. Reasoning remains visible during the current session when the endpoint emits it; only validated final responses are saved as tool evidence. Foundation-Sec advertises native thinking; the installed VulnLLM endpoint currently does not. Findings appear during the run and remain available after reopening it. Older structured script/model observations are recovered from verified evidence and stay suspected.
+Tab completes commands; up/down recall prompts. Ctrl+L focuses input, Ctrl+R opens runs, F1 shows help, and Ctrl+Q stops work before closing. The sidebar hides below 100 columns. The selected coder and all three local reviewers remain visible in the header; F3 opens their roles, activity and live responses. Local source reviews stream exposed reasoning separately from provisional analysis. Reasoning remains visible during the current session when the endpoint emits it; only validated final responses are saved as tool evidence. Foundation-Sec advertises native thinking; the installed VulnLLM endpoint currently does not. Findings appear during the run and remain available after reopening it. Older structured script/model observations are recovered from verified evidence and stay suspected.
 
 Resuming a mounted-project report does not change the selected directory. Disposable runs restore verified files into a new disposable workspace. Report contents never grant permission to mount another path, and interrupted side effects are never replayed.
 

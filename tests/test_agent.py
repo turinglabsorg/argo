@@ -197,8 +197,8 @@ def test_coder_uses_only_local_endpoint_and_validates_output(monkeypatch):
     def response(request):
         requests.append(request)
         return httpx.Response(200, text=json.dumps({"message": {"content": '{"value": 4}'}, "done": True}))
-    client = httpx.Client
-    monkeypatch.setattr("argo.agent_models.httpx.Client", lambda **kwargs: client(transport=httpx.MockTransport(response), **kwargs))
+    client = httpx.AsyncClient
+    monkeypatch.setattr("argo.agent_models.httpx.AsyncClient", lambda **kwargs: client(transport=httpx.MockTransport(response), **kwargs))
     schema = {"type": "object", "properties": {"value": {"type": "integer"}}, "required": ["value"], "additionalProperties": False}
     assert structured(CODER, [{"role": "user", "content": "Count"}], schema) == {"value": 4}
     assert requests[0].url.host == "127.0.0.1"

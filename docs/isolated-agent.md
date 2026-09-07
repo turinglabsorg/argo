@@ -41,7 +41,8 @@ The coordinator chooses an action and parameters. The controller validates both 
 | python.run | Fixed Python executable with one workspace script |
 | python.tests | Fixed pytest invocation over the project |
 | bandit.scan | Recursive Bandit scan |
-| security.review | Optional local Foundation-Sec or VulnLLM |
+| security.review | One local reviewer: foundation, vulnllm or qwen |
+| security.review_all | All three reviewers concurrently on the selected paths |
 | mcp.TOOL | Remote tool intersected with operator policy |
 | finish | Saves the result and code diff |
 
@@ -77,7 +78,7 @@ Authenticated/stdio MCP and the CVE sidecar remain unimplemented. MCP authentica
 
 ## Model activity and context
 
-The TUI shows coding/coordination, Foundation-Sec and VulnLLM as separate roles. F3 or /models opens live output and readiness. Local source-review callbacks publish exposed reasoning separately from provisional summaries/findings. Ollama capabilities are read through /api/show; thinking is enabled only when advertised. Reasoning is transient, sanitized output, never validated evidence or an instruction source. Loading shows elapsed time before output arrives. Completed reviews are read back from verified evidence when reopening a run. The former agent-demo command is removed from the public CLI and TUI; its internal validation module remains for regression checks.
+The TUI shows coding/coordination, Foundation-Sec, VulnLLM and Qwen3.8 27B as separate roles, with independent activity and live messages during concurrent reviews. F3 or /models opens live output and readiness. Local source-review callbacks publish exposed reasoning separately from provisional summaries/findings. Ollama capabilities are read through /api/show; thinking is enabled only when advertised. Reasoning is transient, sanitized output, never validated evidence or an instruction source. Loading shows elapsed time before output arrives. Completed reviews are read back from verified evidence when reopening a run. The former agent-demo command is removed from the public CLI and TUI; its internal validation module remains for regression checks.
 
 Provider limits are read from model metadata and cached per endpoint, model, credential reference and override for five minutes, with a task-start refresh. OpenRouter context_length/top_provider.context_length and max_completion_tokens are supported, alongside compatible context_window, max_input_tokens and max_output_tokens fields. Ollama /api/show identifies model capacity while the configured runtime uses num_ctx=16384 unless overridden. Unknown endpoint metadata produces a visible 16,384-token fallback. Profile overrides preserve manual support for any compatible endpoint. API failures never cause provider substitution.
 
@@ -94,3 +95,23 @@ The coordinator uses `findings.record` with source path, optional line, title, s
 Older agent reports with an empty findings list are reconstructed at read time from content-verified tool records. Supported legacy aliases are `titolo`, `file` and `evidenza`. Free-form final summaries are not parsed into findings, arbitrary evidence citations in tool output are discarded, and invalid paths are ignored. Original reports and manifests are not rewritten. Runs displays the recovered count.
 
 Local source review reserves space for an output increase from 4,096 to 8,192 tokens. A length stop retries only that inference once; errors distinguish truncation, malformed JSON, incomplete streams, HTTP errors, connection failures and timeouts. The 16,384-token local context, 2 MiB stream budget and 300-second per-request deadline remain independent of the selected coding provider context.
+
+
+## Third reviewer and concurrent reviews
+
+`security.review` accepts `model: qwen` for the pinned Heretic ARA Q4_K_M artifact (`argo-qwen:27b`). This is an experimental general reasoning model, not a model trained specifically for security. Its source-review allocation is 32,768 context tokens and 8,192 initial output tokens, with one truncation-only retry at 16,384. Temperature is 0.6. Each inference has a 3,600-second deadline, a 600-second idle-read limit and an 8 MiB transport bound to accommodate reasoning deltas. These are local serving allocations, not the model's advertised maximum context or the selected coding provider's limits.
+
+`security.review_all` accepts only `paths` (1–6 existing relative source paths). Three fixed worker threads call the configured reviewers against the same snapshot; they receive no workspace-writing or execution tools. A bounded queue delivers activity and results back to the controller thread. SQLite and evidence writes remain on that thread. Each completed or failed reviewer receives its own `agent_tool` record under `security.review`; the aggregate result includes `reviews`, `execution: concurrent`, and `status: complete|partial`. Each review carries model, status and evidence_id, plus a validated answer or sanitized error. Failures become coverage gaps; successful findings remain suspected. Cancellation retains already recorded responses and stops the remaining requests.
+
+The local HTTP reader polls cancellation during connection, model loading and silent stream periods every 0.2 seconds, and cancels/closes pending asynchronous requests. The synchronous public review API runs this reader in its own worker event loop. Interleaved TUI updates reuse a message per reviewer and never mark another reviewer finished merely because its peer emits a token.
+
+A task using Qwen or all reviewers expands its overall deadline from 30 minutes to four hours, while keeping per-request and step bounds. Foundation-Sec and VulnLLM retain their 16,384-token contexts and 4,096→8,192 output budgets. Ollama decides whether the models fit in memory together; concurrent dispatch does not prove simultaneous inference. The legacy audit and advisory chat commands retain their two original specialist adapters.
+
+Run the owned SQL-injection and object-ownership controls with:
+
+```sh
+uv run python scripts/evaluate_reviewers.py --model qwen --output /tmp/argo-qwen-evaluation
+uv run python scripts/evaluate_reviewers.py --model all --output /tmp/argo-parallel-evaluation
+```
+
+Use a fresh output directory for each evaluation. `--sequential` provides a serial comparison. The harness executes both vulnerable and fixed controls before inference, saves source hashes, elapsed times and separate model answers, and leaves issue interpretation to a reviewer. It does not score substring matches as security accuracy.

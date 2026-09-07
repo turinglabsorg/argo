@@ -25,13 +25,15 @@ Inherit the user's terminal monospace font. Do not download fonts or images. Use
 
 ## Layout and interaction
 
-- Brand bar names all three model roles. Keep the selected coder, Foundation-Sec and VulnLLM visible at both terminal widths, with compact labels when space is limited.
+- Brand bar names the selected coder and all three local reviewers: Foundation-Sec, VulnLLM and Qwen3.8 27B. Wrap onto a second line when needed at 80 columns. Each reviewer has its own activity card; label Qwen as an experimental deep review role without implying it participated before being called.
 - Conversation occupies the flexible left column. Use distinct speaker labels and whitespace, not a box around every message.
 - A 34-cell case sidebar shows scope, authorization, models, and run status. Hide below 100 columns; `/scope` remains available.
 - Conversation, Models, Findings, and Runs tabs separate work, model activity and saved evidence. F3 or /models opens the model roster; F2 continues to configure the coder.
 - A bottom input accepts prose and explicit slash commands. Tab completes commands; up/down recall in-memory prompt history. Enter submits. Escape requests cancellation. Ctrl+L focuses input. Ctrl+Q exits after stopping any active task.
 - First launch shows a five-line ASCII ARGO wordmark in the existing teal accent, a short security-and-coding description, and essential shortcuts. Keep the whole introduction readable at 80x24. Remove the agent-demo command from the TUI, CLI, help and current command documentation.
 - Show each model's role, identity, availability and current activity. Stream API-exposed local reasoning in a separate, muted `Reasoning` message, followed by provisional analysis and final suspected findings. Preserve the reasoning when the answer arrives; it is transient model output, not verified evidence. Show a short loading state immediately, with elapsed seconds until output arrives. Never invent reasoning for endpoints that do not expose it or claim participation before a model is called. Keep failure causes concise and specific.
+- Parallel reviewers keep independent activity, loading timers and response widgets. Interleaved tokens must update the existing model message; switching the speaker must not finish another reviewer or create duplicate bubbles. Preserve completed responses if the remaining reviewers are cancelled.
+- Live model output follows the newest text when the viewer is at the bottom. Preserve its scroll position when the operator scrolls up to read an earlier passage.
 - Findings use a table and a detail pane showing provenance, evidence identifiers, and remediation. Selecting a finding supplies context for the next chat question.
 - Populate Findings during agent runs and after reopening them. Show model and script observations as suspected, retain evidence links, and use info for unspecified severity. Recover structured observations from verified older tool records without treating prose or passing static scripts as confirmed vulnerabilities.
 - Plain text starts the isolated agent. Show its current tool/model and keep the offline code boundary visible. `/chat` is explicitly advisory. Tool calls cannot alter scope, MCP policy or host access.

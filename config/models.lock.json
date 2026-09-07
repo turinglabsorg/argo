@@ -1,6 +1,18 @@
 {
   "models": [
     {
+      "alias": "argo-qwen:27b",
+      "role": "deep-review",
+      "repository": "mradermacher/Qwen3.8-27B-heretic-ara-GGUF",
+      "revision": "f69c978f262c983cb312395d18bbce340260e89f",
+      "filename": "Qwen3.8-27B-heretic-ara.Q4_K_M.gguf",
+      "size": 16810715008,
+      "sha256": "cf54665071ba77538690d90dc3b4ae99f3dc4a1a13d1f340dc87b09ac442c22f",
+      "quantization": "Q4_K_M",
+      "provenance": "Community quantization of trohrbaugh's Heretic ARA variant",
+      "upstream": "https://huggingface.co/trohrbaugh/Qwen3.8-27B-heretic-ara"
+    },
+    {
       "alias": "argo-foundation-sec:8b",
       "role": "analyst",
       "repository": "fdtn-ai/Foundation-Sec-8B-Reasoning-Q4_K_M-GGUF",
