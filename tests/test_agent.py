@@ -6,8 +6,9 @@ from pathlib import Path
 
 import httpx
 import pytest
+from jsonschema import Draft202012Validator
 
-from argo.agent import restore, run_agent
+from argo.agent import TOOLS, action_validation_error, restore, run_agent
 from argo.agent_demo import SEED, VERIFY
 from argo.agent_models import CODER, edit, structured
 from argo.controller import Cancelled
@@ -15,6 +16,16 @@ from argo.data.agent.remote import MCP, endpoint
 from argo.evidence import read_evidence, verify
 from argo.mcp import MCPClient, MCPProfile, default_profile
 from argo.workspace import Workspace, validate_files, validate_path
+
+
+def test_tool_validation_feedback_does_not_echo_source():
+    validator = Draft202012Validator(TOOLS["code.edit"])
+    error = next(validator.iter_errors({"paths": ["app.py"], "instruction": "private-source" * 400}))
+    message = action_validation_error(error)
+    assert "4000" in message and "short instruction" in message
+    assert "private-source" not in message
+    missing = next(validator.iter_errors({"paths": ["app.py"]}))
+    assert "missing required fields: instruction" in action_validation_error(missing)
 
 
 @pytest.mark.parametrize("path", ["", ".", "..", "../escape", "/tmp/out", "a/../out", "a//b", "a/./b", ".env", "a/.ssh/x", "a\\b", "a\x1bb"])

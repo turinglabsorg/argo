@@ -1,3 +1,4 @@
+import asyncio
 import json
 import threading
 from pathlib import Path
@@ -10,7 +11,7 @@ from argo.agent import run_agent
 from argo.agent_findings import load_agent_findings, tool_findings
 from argo.agent_models import QWEN, REVIEWER, SPECIALISTS
 from argo.context_budget import ModelLimits
-from argo.evidence import EvidenceStore, read_state, verify
+from argo.evidence import EvidenceStore, read_evidence, read_state, verify
 from argo.tui import ArgoApp
 
 
@@ -129,6 +130,54 @@ def test_parallel_review_saves_independent_evidence_and_coverage_gaps(tmp_path, 
     assert all(f['status'] == 'suspected' for f in report['findings'])
     assert {f['evidence_ids'][0] for f in report['findings']} <= {r['evidence_id'] for r in individual}
     assert verify(path)['status'] == 'verified'
+
+
+@pytest.mark.live
+@pytest.mark.asyncio
+async def test_failed_single_review_is_recorded_and_restored(tmp_path, monkeypatch):
+    calls = []
+
+    def chunks(body):
+        calls.append(body)
+        yield {'error': 'Private internal failure'}
+
+    actions = [{'action': 'security.review', 'parameters': {'model': 'qwen', 'paths': ['app.py']}}, {'action': 'finish', 'parameters': {'summary': 'Specialist unavailable'}}]
+    with endpoint('ollama', chunks=chunks) as (local, _), endpoint('openai', replies=actions) as (coding, _):
+        monkeypatch.setattr('argo.agent_models.ENDPOINT', local.base_url)
+        result = await asyncio.to_thread(run_agent, 'Review source without edits', tmp_path / 'runs', seed={'app.py': 'value = 1'}, coding=coding, use_mcp=False, max_steps=2)
+    assert len(calls) == 1 and calls[0]['model'] == QWEN
+    path = Path(result['report']).parent
+    report = json.loads((path / 'report.json').read_text())
+    event = report['tools'][0]
+    assert event['tool'] == 'security.review' and event['model'] == QWEN
+    assert event['status'] == 'failed'
+    saved = read_evidence(path, event['evidence_id'])['data']['result']
+    assert saved['error'] and 'Private internal failure' not in str(saved)
+    assert report['findings'] == [] and len(report['coverage_gaps']) == 1
+    monkeypatch.setattr('argo.tui.doctor', lambda: {'ollama': {'local_models': []}})
+    monkeypatch.setattr('argo.tui.model_limits', lambda *_: ModelLimits())
+    app = ArgoApp(tmp_path / 'runs', project=None, settings_path=tmp_path / 'models.json')
+    async with app.run_test(size=(80, 24)):
+        app.resume(path.name)
+        assert app.model_activity[QWEN]['state'] == 'Error'
+        assert app.model_activity[QWEN]['text'] == saved['error']
+    assert verify(path)['status'] == 'verified'
+
+
+@pytest.mark.asyncio
+async def test_legacy_specialist_gap_restores_error_without_changing_report(tmp_path, monkeypatch):
+    path, report, _ = legacy_run(tmp_path / 'runs')
+    report['coverage_gaps'] = [QWEN + ': Local review exceeded its deadline.']
+    original = json.dumps(report)
+    (path / 'report.json').write_text(original)
+    monkeypatch.setattr('argo.tui.doctor', lambda: {'ollama': {'local_models': []}})
+    monkeypatch.setattr('argo.tui.model_limits', lambda *_: ModelLimits())
+    app = ArgoApp(tmp_path / 'runs', project=None, settings_path=tmp_path / 'models.json')
+    async with app.run_test(size=(80, 24)):
+        app.resume(path.name)
+        assert app.model_activity[QWEN]['state'] == 'Error'
+        assert 'exceeded its deadline' in app.model_activity[QWEN]['text']
+    assert (path / 'report.json').read_text() == original
 
 
 @pytest.mark.asyncio

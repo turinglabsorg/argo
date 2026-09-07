@@ -17,4 +17,5 @@ jobs:
       - run: uv run python scripts/validate_design.py
       - run: uv run python scripts/install_scanners.py
       - run: uv run python scripts/install_worker.py
+      - run: uv run python scripts/install_test_database.py
       - run: uv run pytest -q

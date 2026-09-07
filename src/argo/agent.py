@@ -11,6 +11,7 @@ from jsonschema import Draft202012Validator, ValidationError
 from argo.advisories import AdvisoryService, review_context
 from argo.agent_findings import FINDING_SCHEMA, apply_cve_reviews, merge_findings, tool_findings
 from argo.agent_models import (
+    ANALYST,
     CODER,
     QWEN,
     SPECIALISTS,
@@ -30,12 +31,26 @@ from argo.model_activity import analysis_text
 from argo.project_inventory import inventory
 from argo.providers import model_limits
 from argo.scanners import read_sources
+from argo.test_database import database_mode
 from argo.workspace import Workspace, project_directory, validate_files, validate_path
 
 
 def obj(properties=None):
     properties = properties or {}
     return {"type": "object", "properties": properties, "required": list(properties), "additionalProperties": False}
+
+
+def action_validation_error(error):
+    field = ".".join(["parameters", *map(str, error.absolute_path)])
+    if error.validator == "maxLength":
+        message = f"{field} must have at most {error.validator_value} characters."
+        if field.endswith(".instruction"):
+            message += " For code.edit, send a short instruction and paths; the coding model writes the full source."
+        return message
+    if error.validator == "required":
+        missing = [key for key in error.validator_value if key not in error.instance]
+        return f"{field} is missing required fields: {', '.join(missing)}. Follow the selected tool schema."
+    return f"{field} failed the {error.validator} constraint. Follow the selected tool schema."
 
 
 PATH = {"type": "string", "minLength": 1, "maxLength": 240}
@@ -83,6 +98,9 @@ For applicable candidates, inspect the affected API, prerequisites, input contro
 Use local positive/negative regression tests to assess reachability. For Node, write CommonJS tests
 at tests/argo-security/NAME.test.cjs with node:test and node:assert/strict, then call node.tests.
 The Node runner is offline and can load dependencies already inside the selected project.
+When controller status includes a test_database, a fresh real MongoDB is available to tests at
+process.env.ARGO_TEST_MONGODB_URI (Python: os.environ['ARGO_TEST_MONGODB_URI']). Connect directly;
+do not start mongodb-memory-server, download binaries or mock the database. Its lifetime is one task.
 Do not run npm installation or package lifecycle scripts. Missing/native-incompatible dependencies
 are explicit validation gaps; do not replace a real package with a fake implementation and claim confirmation.
 security.validation links actual test evidence IDs to a CVE candidate and records your interpretation,
@@ -168,13 +186,14 @@ def export(store, before, after, max_files=100):
 def run_agent(
     task, state_root, seed=None, profile=None, use_mcp=True, cancelled=lambda: False,
     on_progress=lambda _: None, max_steps=24, planner=CODER, validation=None, required_reviews=(),
-    coding=None, project=None, intelligence_mode="offline",
+    coding=None, project=None, intelligence_mode="offline", test_database="off",
 ):
     if not isinstance(task, str) or not task.strip() or len(task) > 8000:
         raise ValueError("Provide a task of 1–8000 characters")
     if not 1 <= max_steps <= 40:
         raise ValueError("Step budget must be between 1 and 40")
     project = project_directory(project) if project is not None else None
+    test_database = database_mode(test_database)
     if project and seed:
         raise ValueError("A mounted project cannot be overwritten with a saved workspace seed")
     seed = validate_files(clean(seed or {}))
@@ -182,6 +201,7 @@ def run_agent(
     coder = coding.model if coding else CODER
     model_options = {"profile": coding} if coding else {}
     policy = {"network": "none", "host_mounts": [str(project)] if project else [], "planner": planner, "coder": coder, "coding_profile": coding.model_dump() if coding else None, "mcp": (profile or default_profile()).model_dump() if use_mcp else None, "intelligence": {"mode": intelligence_mode, "disclosure": "public package/version tuples and typed CVE/CPE identifiers only"}}
+    policy["test_database"] = test_database
     store = EvidenceStore(state_root, "isolated-agent", hashlib.sha256(json.dumps(policy, sort_keys=True).encode()).hexdigest(), 32)
     started = time.monotonic()
     deadline = 1800
@@ -250,9 +270,13 @@ def run_agent(
             progress("auto-compact", compact={key: value for key, value in event.items() if key != "summary"})
         tested_files = node_tested_files = None
         latest_test = None
-        with Workspace(check, project=project) as workspace:
+        workspace_options = {"test_database": test_database} if test_database != "off" else {}
+        with Workspace(check, project=project, **workspace_options) as workspace:
             info = workspace.inspect()
             store.add("workspace_isolation", {"image": workspace.image, "container": workspace.name, "mounts": info["Mounts"], "host_config": info["HostConfig"], "user": info["Config"]["User"]})
+            if test_database != "off":
+                store.add("test_database", workspace.database)
+                progress("test database ready", test_database=workspace.database)
             if project:
                 seed = workspace.call("export")["files"]
                 final_files = dict(seed)
@@ -290,6 +314,7 @@ def run_agent(
                     "step": step + 1, "remaining_steps": max_steps - step,
                     "completed_tools": [{"tool": event["tool"], "exit_code": event["exit_code"], "model": event["model"], "status": event["status"]} for event in events],
                     "intelligence_mode": intelligence_mode,
+                    "test_database": workspace.database if test_database != "off" else None,
                     "cve_candidates": len(cve_catalog["candidates"]) if cve_catalog else 0,
                 }
                 opening = [
@@ -407,7 +432,7 @@ def run_agent(
                         advisory_context = review_context(cve_catalog or {}, arguments["paths"], arguments.get("candidate_ids"))
                         files = {validate_path(path): workspace.call("read", path=path)["content"] for path in arguments["paths"]}
                         model = SPECIALISTS[arguments["model"]]
-                        if model == QWEN:
+                        if model in {ANALYST, QWEN}:
                             deadline = 14400
                         progress(name, model)
                         try:
@@ -423,7 +448,7 @@ def run_agent(
                             message = local_model_error(exc)
                             gaps.append(model + ": " + message)
                             progress("security.review", model, text=message, error=True)
-                            raise ValueError(message + " Continue source review with the selected coding model and report this gap.") from exc
+                            result = {"model": model, "status": "failed", "error": message, "next_step": "Continue source review with the selected coding model and report this gap."}
                     elif name == "security.validation":
                         candidate = next((item for item in findings if item["id"] == arguments["candidate_id"] and item["rule"] == "agent.cve"), None)
                         if not candidate:
@@ -458,7 +483,7 @@ def run_agent(
                     if name in {"python.tests", "node.tests"}:
                         latest_test = observation
                 except (ValueError, KeyError, ValidationError) as exc:
-                    message = redact(str(exc))[:600]
+                    message = action_validation_error(exc) if isinstance(exc, ValidationError) else redact(str(exc))[:600]
                     observations.append({"error": message})
                     store.add("agent_action_error", {"step": step + 1, "error": message})
             else:
@@ -493,6 +518,7 @@ def run_agent(
                 "context_compactions": compact_events,
                 "project": str(project) if project else None,
                 "intelligence": {"mode": intelligence_mode, "inventory": project_inventory, "catalog": cve_catalog},
+                "test_database": test_database,
                 "independent_validation": validation_result,
             }
             write_private(store.path / "report.json", json.dumps(clean(report), indent=2) + "\n")

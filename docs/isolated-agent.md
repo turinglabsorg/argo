@@ -99,7 +99,7 @@ The coordinator uses `findings.record` with source path, optional line, title, s
 
 Older agent reports with an empty findings list are reconstructed at read time from content-verified tool records. Supported legacy aliases are `titolo`, `file` and `evidenza`. Free-form final summaries are not parsed into findings, arbitrary evidence citations in tool output are discarded, and invalid paths are ignored. Original reports and manifests are not rewritten. Runs displays the recovered count.
 
-Foundation-Sec and VulnLLM source reviews reserve space for an output increase from 4,096 to 8,192 tokens. A length stop retries only that inference once; errors distinguish truncation, malformed JSON, incomplete streams, HTTP errors, connection failures and timeouts. Their 16,384-token local context, 2 MiB stream budget and 300-second per-request deadline remain independent of the selected coding provider context. Qwen uses the larger local limits below.
+Foundation-Sec and VulnLLM source reviews reserve space for an output increase from 4,096 to 8,192 tokens. A length stop retries only that inference once; errors distinguish truncation, malformed JSON, incomplete streams, HTTP errors, connection failures and timeouts. Both use a 16,384-token local context and a 2 MiB stream budget. Foundation-Sec uses temperature 0.3 and allows 1,200 seconds per inference; VulnLLM retains temperature 0 and 300 seconds. Both retain a 120-second idle-read timeout and prompt cancellation checks. The longer Foundation-Sec deadline lets active reasoning finish instead of cutting it off at five minutes. These limits remain independent of the selected coding provider context. Qwen uses the larger local limits below.
 
 
 ## Third reviewer and concurrent reviews
@@ -110,7 +110,7 @@ Foundation-Sec and VulnLLM source reviews reserve space for an output increase f
 
 The local HTTP reader polls cancellation during connection, model loading and silent stream periods every 0.2 seconds, and cancels/closes pending asynchronous requests. The synchronous public review API runs this reader in its own worker event loop. Interleaved TUI updates reuse a message per reviewer and never mark another reviewer finished merely because its peer emits a token.
 
-A task using Qwen or all reviewers expands its overall deadline from 30 minutes to four hours, while keeping per-request and step bounds. Foundation-Sec and VulnLLM retain their 16,384-token contexts and 4,096→8,192 output budgets. Ollama decides whether the models fit in memory together; concurrent dispatch does not prove simultaneous inference. The legacy audit and advisory chat commands retain their two original specialist adapters.
+A task using Foundation-Sec, Qwen or all reviewers expands its overall deadline from 30 minutes to four hours, while keeping per-request and step bounds. Foundation-Sec and VulnLLM retain their 16,384-token contexts and 4,096→8,192 output budgets. Ollama decides whether the models fit in memory together; concurrent dispatch does not prove simultaneous inference. The legacy audit and advisory chat commands retain their two original specialist adapters.
 
 Run the owned SQL-injection and object-ownership controls with:
 
@@ -120,6 +120,16 @@ uv run python scripts/evaluate_reviewers.py --model all --output /tmp/argo-paral
 ```
 
 Use a fresh output directory for each evaluation. `--sequential` provides a serial comparison. The harness executes both vulnerable and fixed controls before inference, saves source hashes, elapsed times and separate model answers, and leaves issue interpretation to a reviewer. It does not score substring matches as security accuracy.
+
+## Temporary MongoDB for integration tests
+
+The operator can select `--test-database mongodb` in the CLI or `/test-db mongodb` in the TUI. The default is `off`; TUI selection lasts only for the current app session and is not restored from reports. Model tools cannot change this setting. Install the fixed multi-platform MongoDB image with `scripts/install_test_database.py` before enabling it.
+
+The controller starts MongoDB with `--network container:<worker ID>` after verifying the worker still uses `--network none`. Only loopback is available. MongoDB binds `127.0.0.1:27017`, has no published ports, host/project mounts, credentials or persistent volumes, and uses bounded tmpfs data storage, a read-only root, dropped capabilities and resource limits. It never connects to a user's existing database. The controller validates Docker isolation, waits for loopback readiness, and removes the database before the worker on success, failure or cancellation.
+
+Every execution inside the enabled worker receives `ARGO_TEST_MONGODB_URI=mongodb://127.0.0.1:27017/argo_test`. Tests use their installed driver directly. Data persists between tool calls within one task, and a subsequent task starts empty. The selected mode is recorded in policy/report data; immutable `test_database` evidence records the image, container and fixture URI. Missing images fail explicitly without automatic downloads. Other database engines and arbitrary connection strings are unsupported.
+
+This fixes test-database connectivity; it does not make macOS native Node dependencies executable on Linux. Project test runners and their platform dependencies must already be available. The integration controls exercise real MongoDB insert/find operations, isolation, fresh-task state, startup failure cleanup and cancellation. They do not establish compatibility with a project's deployed database version.
 
 ## Inventory, advisory context and runtime evidence
 

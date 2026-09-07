@@ -6,6 +6,7 @@ import uuid
 from pathlib import Path, PurePosixPath
 
 from argo.sandbox import command
+from argo.test_database import MONGODB_URI, database_mode, start_mongodb
 
 WORKER_CONFIG = Path.home() / ".argo" / "worker.json"
 MAX_TOTAL = 2 * 1024 * 1024
@@ -88,12 +89,16 @@ def decode(code, output):
 
 
 class Workspace:
-    def __init__(self, check=lambda: None, image=None, project=None):
+    def __init__(self, check=lambda: None, image=None, project=None, test_database="off"):
         self.check = check
         self.image = image or worker_image()
         self.name = "argo-code-" + uuid.uuid4().hex
         self.active = False
         self.project = project_directory(project) if project is not None else None
+        self.test_database = database_mode(test_database)
+        self.database_name = self.name + "-mongodb"
+        self.database_started = False
+        self.database = None
 
     def __enter__(self):
         try:
@@ -108,9 +113,15 @@ class Workspace:
             mounted = self.project and len(mounts) == 1 and mounts[0]["Type"] == "bind" and mounts[0]["Destination"] == "/workspace" and mounts[0]["RW"] and Path(mounts[0]["Source"]).resolve() == self.project
             if (not mounted if self.project else bool(mounts)) or details["HostConfig"]["NetworkMode"] != "none":
                 raise RuntimeError("Workspace isolation validation failed")
+            if self.test_database == "mongodb":
+                self.database_started = True
+                self.database = start_mongodb(details["Id"], self.database_name, self.check)
             return self
         except BaseException:
-            remove(self.name)
+            try:
+                self.close()
+            finally:
+                remove(self.name)
             raise
 
     def inspect(self):
@@ -127,8 +138,9 @@ class Workspace:
         if "path" in arguments:
             validate_path(arguments["path"])
         try:
+            environment = ["--env", "ARGO_TEST_MONGODB_URI=" + MONGODB_URI] if self.database else []
             code, output, _ = command(
-                ["docker", "exec", "-i", self.name, "python", "-I", "/opt/argo/worker.py"],
+                ["docker", "exec", "-i", *environment, self.name, "python", "-I", "/opt/argo/worker.py"],
                 60, self.check, json.dumps({"action": action, **arguments}).encode(),
             )
         except BaseException:
@@ -144,9 +156,15 @@ class Workspace:
         return result
 
     def close(self):
-        if self.active:
-            remove(self.name)
-            self.active = False
+        try:
+            if self.database_started:
+                remove(self.database_name)
+                self.database_started = False
+                self.database = None
+        finally:
+            if self.active:
+                remove(self.name)
+                self.active = False
 
     def __exit__(self, *_):
         self.close()

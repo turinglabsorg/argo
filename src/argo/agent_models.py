@@ -37,6 +37,8 @@ class ReviewLimits:
 
 
 def review_limits(model):
+    if model == ANALYST:
+        return ReviewLimits(deadline=1200, temperature=0.3)
     if model == QWEN:
         return ReviewLimits(32768, (8192, 16384), 3600, 600, 0.6, 8 * 1024**2)
     return ReviewLimits()

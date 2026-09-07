@@ -33,6 +33,29 @@ async def wait_idle(app, pilot):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("size", [(80, 30), (120, 40)])
+async def test_tui_test_database_selection(tmp_path, monkeypatch, size):
+    selected = []
+
+    def capture(app, prompt):
+        selected.append(app.test_database)
+        app.finish()
+
+    monkeypatch.setattr(ArgoApp, "agent_work", capture)
+    app = ArgoApp(tmp_path / "runs", project=None, settings_path=tmp_path / "models.json")
+    async with app.run_test(size=size) as pilot:
+        app.dispatch("/test-db mongodb")
+        assert app.test_database == "mongodb"
+        app.dispatch("/test-db host")
+        assert app.test_database == "mongodb"
+        app.dispatch("/agent Check the fixture")
+        assert selected == ["mongodb"]
+        app.dispatch("/test-db off")
+        assert app.test_database == "off"
+        await pilot.pause()
+
+
+@pytest.mark.asyncio
 async def test_tui_small_screen_commands_and_literal_rendering(tmp_path):
     app = ArgoApp(tmp_path)
     async with app.run_test(size=(80, 24)) as pilot:

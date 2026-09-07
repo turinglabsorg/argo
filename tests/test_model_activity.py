@@ -64,7 +64,8 @@ def test_native_reasoning_arrives_before_the_answer(monkeypatch):
     assert all('ownership checks' not in text for text in answers)
 
 
-def test_truncated_review_retries_only_inference_with_more_output(monkeypatch):
+@pytest.mark.parametrize('model,temperature', [(ANALYST, 0.3), (REVIEWER, 0)])
+def test_truncated_review_retries_only_inference_with_more_output(monkeypatch, model, temperature):
     final = {'summary': 'Reviewed', 'suspected_findings': []}
     def chunks(body):
         truncated = body['options']['num_predict'] == 4096
@@ -72,10 +73,11 @@ def test_truncated_review_retries_only_inference_with_more_output(monkeypatch):
     with endpoint('ollama', chunks=chunks, metadata={'capabilities': ['completion']}) as (profile, records):
         monkeypatch.setattr('argo.agent_models.ENDPOINT', profile.base_url)
         statuses = []
-        assert review(REVIEWER, {'app.py': 'value = 1'}, on_status=statuses.append)['summary'] == 'Reviewed'
+        assert review(model, {'app.py': 'value = 1'}, on_status=statuses.append)['summary'] == 'Reviewed'
     requests = [record['body'] for record in records if record['path'] == '/api/chat']
     assert [body['options']['num_predict'] for body in requests] == [4096, 8192]
     assert all(body['think'] is False for body in requests)
+    assert all(body['options']['temperature'] == temperature for body in requests)
     assert requests[0]['messages'] == requests[1]['messages']
     assert any('retrying' in text for text in statuses)
 

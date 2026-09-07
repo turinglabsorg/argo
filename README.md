@@ -72,7 +72,7 @@ Argo reads the selected model's limits from its API, caches them for five minute
 
 Before each coordination request, Argo estimates token use from UTF-8 text and retains a 10% safety margin plus a response reserve. This is an estimate, not the provider's exact tokenizer count. At 90% of the input budget, auto-compact summarizes older history, retaining the original task, the deterministic completed-tool ledger and recent results. It saves a verified compaction record and context.json before the next action. Failed compaction does not discard history or replay tools. F3 shows the context limit, estimated use and compaction count.
 
-Endpoints that do not publish context limits use an explicitly labelled 16,384-token fallback; set an override in F2 when the endpoint requires it. Foundation-Sec and VulnLLM reviews use 16,384-token contexts; Qwen reviews use 32,768. These local allocations are independent of the coding provider context. Large specialist reviews are split into source batches; cross-batch findings still require verification.
+Endpoints that do not publish context limits use an explicitly labelled 16,384-token fallback; set an override in F2 when the endpoint requires it. Foundation-Sec and VulnLLM reviews use 16,384-token contexts; Qwen reviews use 32,768. These local allocations are independent of the coding provider context. Large specialist reviews are split into source batches; cross-batch findings still require verification. Foundation-Sec uses temperature 0.3 and allows up to 20 minutes per inference, with a separate two-minute idle timeout and immediate cancellation, so active reasoning can continue past the old five-minute cutoff.
 
 Reports, summaries and evidence persist. A new task currently starts a new conversation over the selected project or restored files; /resume reopens results, including local model responses, and does not replay actions or automatically load old conversation memory.
 
@@ -94,6 +94,14 @@ The default is the current directory. --isolated, --import and --continue use di
 
 Python changes require passing pytest before completion. Other text files can be edited, with missing runtime verification explicitly recorded. Python 3.12, pytest, Bandit and Node.js 22 are installed. The `node.tests` tool runs tests/argo-security/*.test.cjs against already available project dependencies. Network package installation is unavailable; targeted controls do not establish full project test coverage. See [runtime contracts and limits](docs/isolated-agent.md).
 
+### Local test database
+
+Use `/test-db mongodb` in the TUI, or `argo agent 'TASK' --test-database mongodb`, to start a fresh MongoDB for the task. The selection in the TUI lasts for the current app session; `/test-db off` disables it. Tests receive `ARGO_TEST_MONGODB_URI`. Connect with the project's existing MongoDB driver instead of starting or downloading a database binary.
+
+The database shares only the worker's loopback network, has no project mount or published ports, and stores synthetic data in temporary memory. Both containers are removed on completion, failure or cancellation. The worker keeps external networking disabled. Native test-runner dependencies must still be available for Linux; selecting a database does not install them.
+
+Install the pinned database image once with `uv run python scripts/install_test_database.py`.
+
 ## Terminal controls
 
 The TUI uses [Textual](https://github.com/Textualize/textual) under MIT.
@@ -103,6 +111,7 @@ The TUI uses [Textual](https://github.com/Textualize/textual) under MIT.
 | Create or change code | Type a task or /agent TASK |
 | Select coding endpoint and model | F2 or /model |
 | Show or change the mounted project | /workspace or /workspace PATH |
+| Select an isolated test database | /test-db mongodb, /test-db off |
 | Switch to a disposable workspace | /isolated |
 | Copy sanitized sources into disposable mode | /import PATH |
 | Reset context while retaining the selected project | /reset |

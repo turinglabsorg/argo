@@ -44,6 +44,7 @@ from argo.workspace import project_directory
 COMMANDS = [
     "/cve",
     "/workspace",
+    "/test-db",
     "/isolated",
     "/agent",
     "/models",
@@ -75,6 +76,7 @@ CVE intelligence   /cve connected | offline (no argument: status)
 Coding model       /model or F2 (local / OpenAI / Anthropic)
 All models         /models or F3 (roles, activity and live responses)
 Mounted project    /workspace [PATH]
+Test database      /test-db [mongodb | off]
 Disposable mode    /isolated
 Import project     /import /path/to/project
 Fresh workspace    /reset
@@ -295,6 +297,7 @@ class ArgoApp(App):
         self.agent_seed = {}
         self.agent_profile = default_profile()
         self.agent_mcp = True
+        self.test_database = "off"
         self.project = Path.cwd().resolve() if project is ... else project
         self.settings_path = settings_path
         self.coding = load_settings(settings_path).coding
@@ -564,6 +567,12 @@ class ArgoApp(App):
                     self.agent_seed = {}
                 self.refresh_case()
                 self.say("ARGO", f"Mounted read/write for the next task: {self.project}" if self.project else "Disposable workspace. /workspace PATH selects a project.")
+            elif command == "/test-db" and len(args) <= 1:
+                if args:
+                    if args[0] not in {"off", "mongodb"}:
+                        raise ValueError("Use /test-db mongodb or /test-db off")
+                    self.test_database = args[0]
+                self.say("ARGO", "Test database: " + self.test_database + (" · temporary, worker loopback only" if self.test_database == "mongodb" else ""))
             elif command == "/isolated" and not args:
                 self.project = None
                 self.agent_seed = {}
@@ -821,6 +830,7 @@ class ArgoApp(App):
                 "profile": self.agent_profile, "use_mcp": self.agent_mcp,
                 "coding": self.coding.model_copy(deep=True),
                 "intelligence_mode": load_mode(self.intelligence_path),
+                "test_database": self.test_database,
                 "cancelled": self.cancel_event.is_set,
                 "on_progress": lambda data: self.call_from_thread(self.progress, data),
             }
@@ -1003,6 +1013,12 @@ class ArgoApp(App):
             for item in report.get("tools", []):
                 if item.get("tool") == "security.review":
                     analyses.append(read_evidence(path, item["evidence_id"])["data"]["result"])
+            recorded_models = {analysis.get("model") for analysis in analyses}
+            for model in SPECIALISTS.values():
+                if model not in recorded_models:
+                    errors = [gap.removeprefix(model + ": ") for gap in report.get("coverage_gaps", []) if gap.startswith(model + ": ")]
+                    if errors:
+                        analyses.append({"model": model, "status": "failed", "error": "\n".join(errors)})
             for analysis in analyses:
                 if analysis.get("model"):
                     activity = self.model_activity.setdefault(analysis["model"], {})
