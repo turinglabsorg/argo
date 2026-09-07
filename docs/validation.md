@@ -21,7 +21,17 @@ The worker was rebuilt from pinned inputs; the installed local image is sha256:a
 
 ## Checks
 
-The final local suite passed 100 tests in 48.12 seconds. Ruff and structural documentation validation passed; the 0.3 source distribution and wheel built successfully. The global argo command was updated with frozen dependency constraints. API compatibility and small smoke tasks do not establish arbitrary model reliability or broad pentest coverage.
+### OpenRouter Muse Spark 1.3 Contributor
+
+The authenticated OpenRouter profile uses https://openrouter.ai/api/v1 and meta/muse-spark-1.3-contributor with JSON schema mode. Its credential was imported directly from a user-provided Bitwarden Send into Hush and used only through the fixed provider child. No key value was inspected, persisted in profile settings or added to repository files.
+
+Actual TUI run b9381aee41d24e9f82e9df85141a43a9 completed five tool calls: two source reads, a failing pytest run, a code edit and a passing pytest run. The model changed calculator.py in the mounted synthetic project while leaving the existing regression unchanged. A new container independently passed that regression, and all nine evidence files verified. The TUI loaded the persisted global profile and its connection Test succeeded against the real model.
+
+The previous 256-token connection probe exhausted the model's output budget; the same structured request succeeded with 2,048 tokens. The probe now permits 2,048 tokens. A local HTTP/TUI regression fixture simulates a reasoning model that requires tokens before its JSON output and checks that truncated responses remain rejected.
+
+### Local suite
+
+After the OpenRouter probe fix, the local suite passed 101 tests in 49.66 seconds. Ruff and structural documentation validation passed; the 0.3 source distribution and wheel built successfully. The global editable argo command uses frozen dependency constraints and includes the probe fix. API compatibility and small smoke tasks do not establish arbitrary model reliability or broad pentest coverage.
 
 ---
 

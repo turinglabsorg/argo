@@ -103,7 +103,7 @@ class ModelDialog(ModalScreen):
     def probe(self, profile, discover):
         app = self.app
         try:
-            result = list_models(profile) if discover else generate(profile, [{"role": "user", "content": "Return the object with ok equal to true."}], {"type": "object", "properties": {"ok": {"const": True}}, "required": ["ok"], "additionalProperties": False}, tokens=256)
+            result = list_models(profile) if discover else generate(profile, [{"role": "user", "content": "Return the object with ok equal to true."}], {"type": "object", "properties": {"ok": {"const": True}}, "required": ["ok"], "additionalProperties": False}, tokens=2048)
             app.call_from_thread(self.probe_done, result, discover, None)
         except Exception as exc:
             app.call_from_thread(self.probe_done, None, discover, str(exc))

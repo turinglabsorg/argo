@@ -21,7 +21,7 @@ SCHEMA = {"type": "object", "properties": {"ok": {"const": True}}, "required": [
 
 
 @contextmanager
-def endpoint(protocol, replies=None, status=200, json_response=False):
+def endpoint(protocol, replies=None, status=200, json_response=False, reasoning_tokens=0):
     records = []
     iterator = iter(replies) if replies is not None else None
 
@@ -51,7 +51,8 @@ def endpoint(protocol, replies=None, status=200, json_response=False):
                 self.wfile.write((json.dumps({"message": {"content": content}, "done": True}) + "\n").encode())
             else:
                 if protocol == "openai":
-                    events = [{"choices": [{"delta": {"content": content[:5]}, "finish_reason": None}]}, {"choices": [{"delta": {"content": content[5:]}, "finish_reason": "stop"}]}]
+                    finish = "length" if body.get("max_tokens", 0) < reasoning_tokens else "stop"
+                    events = [{"choices": [{"delta": {"content": content[:5]}, "finish_reason": None}]}, {"choices": [{"delta": {"content": content[5:]}, "finish_reason": finish}]}]
                 else:
                     events = [{"type": "message_start", "message": {"content": []}}, {"type": "content_block_start", "content_block": {"type": "text", "text": ""}}, {"type": "content_block_delta", "delta": {"type": "text_delta", "text": content[:5]}}, {"type": "content_block_delta", "delta": {"type": "text_delta", "text": content[5:]}}, {"type": "message_stop"}]
                 for event in events:
@@ -92,6 +93,27 @@ def test_provider_http_stream_and_discovery(protocol):
 def test_provider_nonstream_compatible_response(protocol):
     with endpoint(protocol, json_response=True) as (profile, _):
         assert generate(profile, [{"role": "user", "content": "JSON"}], SCHEMA) == {"ok": True}
+
+
+@pytest.mark.asyncio
+async def test_tui_connection_probe_allows_reasoning_before_json(tmp_path):
+    settings = tmp_path / "models.json"
+    with endpoint("openai", reasoning_tokens=1024) as (profile, _):
+        with pytest.raises(ValueError, match="truncated"):
+            generate(profile, [{"role": "user", "content": "JSON"}], SCHEMA, tokens=256)
+        save_profile(profile, settings)
+        app = ArgoApp(tmp_path / "runs", project=None, settings_path=settings)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.press("f2")
+            await pilot.pause()
+            button = app.screen.query_one("#coding-test", Button)
+            button.press()
+            await pilot.pause()
+            for _ in range(50):
+                if not button.disabled:
+                    break
+                await pilot.pause(0.1)
+            assert "Connected." in str(app.screen.query_one("#coding-result").render())
 
 
 def test_profiles_url_modes_persistence_and_errors(tmp_path):
