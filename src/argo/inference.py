@@ -5,6 +5,7 @@ import httpx
 
 from argo.contracts import Finding, Proposal
 from argo.evidence import clean, read_evidence
+from argo.model_activity import analysis_text
 
 ENDPOINT = "http://127.0.0.1:11434"
 
@@ -30,6 +31,7 @@ def analyze(
     check=lambda: None,
     evidence_root=None,
     consume=lambda: None,
+    on_text=None,
 ) -> dict:
     check()
     available = {m["name"]: m for m in local_models()}
@@ -76,7 +78,7 @@ def analyze(
                     },
                 ) as response:
                     response.raise_for_status()
-                    text, received, finished = "", 0, False
+                    text, received, finished, updated = "", 0, False, 0.0
                     for line in response.iter_lines():
                         check()
                         received += len(line)
@@ -87,6 +89,10 @@ def analyze(
                             raise ValueError("Local model generation failed")
                         text += chunk.get("message", {}).get("content", "")
                         finished = chunk.get("done", False)
+                        if on_text and (finished or time.monotonic() - updated >= 0.15):
+                            prior = "\n\n".join(analysis_text(json.dumps(value)) for value in proposals)
+                            on_text("\n\n".join(filter(None, [prior, analysis_text(text)])))
+                            updated = time.monotonic()
                     if not finished:
                         raise ValueError("Incomplete model response")
                 try:

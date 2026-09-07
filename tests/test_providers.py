@@ -21,9 +21,9 @@ SCHEMA = {"type": "object", "properties": {"ok": {"const": True}}, "required": [
 
 
 @contextmanager
-def endpoint(protocol, replies=None, status=200, json_response=False, reasoning_tokens=0):
+def endpoint(protocol, replies=None, status=200, json_response=False, reasoning_tokens=0, metadata=None, error=None):
     records = []
-    iterator = iter(replies) if replies is not None else None
+    iterator = iter(replies) if replies is not None and not callable(replies) else None
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_):
@@ -34,21 +34,27 @@ def endpoint(protocol, replies=None, status=200, json_response=False, reasoning_
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
-            self.wfile.write(json.dumps({"models": [{"name": "custom-model"}]} if protocol == "ollama" else {"data": [{"id": "custom-model"}]}).encode())
+            self.wfile.write(json.dumps({"models": [{"name": "custom-model"}]} if protocol == "ollama" else {"data": [{"id": "custom-model", **(metadata or {})}]}).encode())
 
         def do_POST(self):
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             records.append({"method": "POST", "path": self.path, "body": body, "headers": dict(self.headers)})
-            result = next(iterator) if iterator is not None else {"ok": True}
+            result = replies(body) if callable(replies) else (next(iterator) if iterator is not None else {"ok": True})
             content = json.dumps(result)
             self.send_response(status)
             self.send_header("Content-Type", "application/json" if json_response else ("application/x-ndjson" if protocol == "ollama" else "text/event-stream"))
             self.end_headers()
+            if error:
+                self.wfile.write(json.dumps({'error': error}).encode())
+                return
             if json_response:
                 data = {"content": [{"type": "text", "text": content}], "stop_reason": "end_turn"} if protocol == "anthropic" else {"choices": [{"message": {"content": content}, "finish_reason": "stop"}]}
                 self.wfile.write(json.dumps(data).encode())
             elif protocol == "ollama":
-                self.wfile.write((json.dumps({"message": {"content": content}, "done": True}) + "\n").encode())
+                midpoint = len(content) // 2
+                for part, done in [(content[:midpoint], False), (content[midpoint:], True)]:
+                    self.wfile.write((json.dumps({"message": {"content": part, "thinking": "Private scratchpad"}, "done": done}) + "\n").encode())
+                    self.wfile.flush()
             else:
                 if protocol == "openai":
                     finish = "length" if body.get("max_tokens", 0) < reasoning_tokens else "stop"
@@ -99,8 +105,7 @@ def test_provider_nonstream_compatible_response(protocol):
 async def test_tui_connection_probe_allows_reasoning_before_json(tmp_path):
     settings = tmp_path / "models.json"
     with endpoint("openai", reasoning_tokens=1024) as (profile, _):
-        with pytest.raises(ValueError, match="truncated"):
-            generate(profile, [{"role": "user", "content": "JSON"}], SCHEMA, tokens=256)
+        assert generate(profile, [{"role": "user", "content": "JSON"}], SCHEMA, tokens=256) == {"ok": True}
         save_profile(profile, settings)
         app = ArgoApp(tmp_path / "runs", project=None, settings_path=settings)
         async with app.run_test(size=(80, 24)) as pilot:
@@ -224,8 +229,9 @@ def test_agent_uses_selected_endpoint_and_changes_real_project(tmp_path, monkeyp
     with endpoint(protocol, responses()) as (profile, records):
         result = run_agent("Fix addition", tmp_path / "runs", project=project, coding=profile, use_mcp=False, max_steps=4)
     assert result["status"] == "complete", result
-    assert len(records) == 4
-    assert all(row["body"]["model"] == "custom-model" for row in records)
+    generations = [row for row in records if row["method"] == "POST"]
+    assert len(generations) == 4
+    assert all(row["body"]["model"] == "custom-model" for row in generations)
     assert "return a + b" in (project / "app.py").read_text()
     assert (project / "tests/test_app.py").exists()
     assert "-    return a - b" in Path(result["diff"]).read_text()
@@ -266,6 +272,6 @@ async def test_tui_model_selection_persists_and_edits_launch_directory(tmp_path,
             assert app.report_data["status"] == "complete", app.transcript
             assert app.project == project.resolve()
             assert "return a + b" in (project / "app.py").read_text()
-            assert len(records) == 4
+            assert len([row for row in records if row["method"] == "POST"]) == 4
     reopened = ArgoApp(tmp_path / "runs", project=project, settings_path=settings)
     assert reopened.coding.protocol == protocol

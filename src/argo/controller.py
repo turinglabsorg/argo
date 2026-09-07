@@ -9,6 +9,7 @@ from argo.contracts import Engagement, utc_now
 from argo.evidence import EvidenceStore, clean
 from argo.inference import analyze, local_models
 from argo.intelligence import IntelligenceClient
+from argo.model_activity import analysis_text
 from argo.network import HTTPBroker
 from argo.report import render
 from argo.sandbox import scan_snapshot
@@ -271,12 +272,15 @@ def run(
                         check,
                         store.path / "evidence",
                         model_budget,
+                        on_text=lambda text: progress("analysis", model=model, text=text, provisional=True),
                     )
                     analyses.append(analysis)
                     store.add("model_analysis", analysis)
+                    progress("analysis", model=model, text=analysis_text(json.dumps(analysis)), provisional=False)
                 except Cancelled:
                     raise
                 except Exception as exc:
+                    progress("analysis", model=model, text="The local analyst is unavailable or returned an incomplete response.", error=True)
                     gaps.append(f"Local analyst {model} unavailable or incomplete ({type(exc).__name__})")
         else:
             gaps.append("Local model analysis was not selected or there were no findings to analyze.")

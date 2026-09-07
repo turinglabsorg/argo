@@ -3,7 +3,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Label, Select, Static
 
-from argo.providers import CodingProfile, generate, list_models, load_settings, save_profile
+from argo.providers import CodingProfile, generate, list_models, load_settings, model_limits, save_profile
 
 PRESETS = {"ollama": "http://127.0.0.1:11434", "openai": "https://api.openai.com/v1", "anthropic": "https://api.anthropic.com/v1"}
 
@@ -38,6 +38,10 @@ class ModelDialog(ModalScreen):
                 yield Select([("Prompt only — broad compatibility", "prompt"), ("JSON object", "json_object"), ("JSON schema", "json_schema")], value=profile.output_mode, allow_blank=False, id="coding-output")
                 yield Label("OpenAI token parameter")
                 yield Select([("max_tokens", "max_tokens"), ("max_completion_tokens", "max_completion_tokens")], value=profile.token_parameter, allow_blank=False, id="coding-token-param")
+                yield Label("Context tokens — blank uses model API")
+                yield Input(str(profile.context_window or ""), id="coding-context", placeholder="Automatic")
+                yield Label("Output token cap — blank uses available model context")
+                yield Input(str(profile.max_tokens or ""), id="coding-max-tokens", placeholder="Automatic")
                 yield Static("Credentials are read through Hush. Save a key in Bitwarden, import it with hush pull --name NAME, then enter only NAME here.", classes="muted")
             yield Static("Choose an endpoint and model, then save.", id="coding-result", markup=False)
             with Horizontal(classes="dialog-actions"):
@@ -52,7 +56,9 @@ class ModelDialog(ModalScreen):
         return CodingProfile(name=value("name"), protocol=self.query_one("#coding-protocol", Select).value,
                              base_url=value("url"), model=value("model"), credential=value("credential"),
                              output_mode=self.query_one("#coding-output", Select).value,
-                             token_parameter=self.query_one("#coding-token-param", Select).value)
+                             token_parameter=self.query_one("#coding-token-param", Select).value,
+                             context_window=int(value("context")) if value("context") else None,
+                             max_tokens=int(value("max-tokens")) if value("max-tokens") else None)
 
     @on(Select.Changed, "#coding-profile")
     def choose_profile(self, event):
@@ -61,7 +67,7 @@ class ModelDialog(ModalScreen):
         profile = next((p for p in self.settings.profiles if p.name == event.value), CodingProfile(name="New endpoint", model="model-id"))
         self.loading_profile = True
         with self.prevent(Select.Changed):
-            for field, value in [("name", profile.name), ("url", profile.base_url), ("model", profile.model), ("credential", profile.credential)]:
+            for field, value in [("name", profile.name), ("url", profile.base_url), ("model", profile.model), ("credential", profile.credential), ("context", str(profile.context_window or "")), ("max-tokens", str(profile.max_tokens or ""))]:
                 self.query_one("#coding-" + field, Input).value = value
             for field, value in [("protocol", profile.protocol), ("output", profile.output_mode), ("token-param", profile.token_parameter)]:
                 self.query_one("#coding-" + field, Select).value = value
@@ -103,12 +109,13 @@ class ModelDialog(ModalScreen):
     def probe(self, profile, discover):
         app = self.app
         try:
+            limits = model_limits(profile, refresh=True)
             result = list_models(profile) if discover else generate(profile, [{"role": "user", "content": "Return the object with ok equal to true."}], {"type": "object", "properties": {"ok": {"const": True}}, "required": ["ok"], "additionalProperties": False}, tokens=2048)
-            app.call_from_thread(self.probe_done, result, discover, None)
+            app.call_from_thread(self.probe_done, result, discover, None, limits)
         except Exception as exc:
             app.call_from_thread(self.probe_done, None, discover, str(exc))
 
-    def probe_done(self, result, discover, error):
+    def probe_done(self, result, discover, error, limits=None):
         if not self.is_mounted:
             return
         for name in ("coding-list", "coding-test", "coding-save"):
@@ -119,4 +126,4 @@ class ModelDialog(ModalScreen):
             self.query_one("#coding-discovered", Select).set_options([(name, name) for name in result])
             self.query_one("#coding-result", Static).update(f"{len(result)} models found. Select one above or enter its ID.")
         else:
-            self.query_one("#coding-result", Static).update("Connected. Model returned valid structured output.")
+            self.query_one("#coding-result", Static).update(f"Connected. Context: {limits.context_window:,} tokens. Output: {limits.max_output_tokens or 'not advertised'}. {limits.source}.")

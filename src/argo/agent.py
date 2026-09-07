@@ -8,9 +8,13 @@ import httpx
 from jsonschema import Draft202012Validator, ValidationError
 
 from argo.agent_models import ANALYST, CODER, REVIEWER, edit, ready, review, structured
+from argo.context_budget import ModelLimits, estimate_tokens
 from argo.controller import Cancelled
+from argo.conversation import Conversation, save_checkpoint
 from argo.evidence import EvidenceStore, clean, private_dir, read_evidence, redact, write_private
 from argo.mcp import MCPClient, default_profile
+from argo.model_activity import analysis_text
+from argo.providers import model_limits
 from argo.scanners import read_sources
 from argo.workspace import Workspace, project_directory, validate_files, validate_path
 
@@ -122,6 +126,7 @@ def run_agent(
     status, summary, gaps, events, final_files = "failed", "", [], [], dict(seed)
     snapshot = None
     validation_result = None
+    compact_events = []
 
     def check():
         if cancelled() or store.cancelled():
@@ -129,13 +134,16 @@ def run_agent(
         if time.monotonic() - started > 1800:
             raise TimeoutError("Agent task deadline exceeded")
 
-    def progress(stage, model=None):
+    def progress(stage, model=None, **details):
         store.set("status", stage)
-        on_progress({"run_id": store.run_id, "stage": stage, "model": model or planner})
+        on_progress({"run_id": store.run_id, "stage": stage, "model": model or planner, **clean(details)})
 
     try:
         if coding is None:
             ready()
+        limits = model_limits(coding, check, refresh=True) if coding else ModelLimits()
+        store.add("model_limits", limits.model_dump())
+        progress("model limits", limits=limits.model_dump())
         store.add("agent_policy", policy)
         store.add("operator_task", {"task": task})
         catalog = dict(TOOLS)
@@ -150,8 +158,17 @@ def run_agent(
                 gaps.append("MCP unavailable: " + redact(str(exc))[:400])
                 mcp = None
         schema = obj({"action": {"type": "string", "enum": list(catalog)}, "parameters": {"type": "object"}})
-        observations = []
+        conversation = Conversation(limits)
+        observations = conversation.observations
+
+        def compact_progress(event):
+            if event["phase"] == "complete":
+                identity = store.add("context_compaction", event)
+                save_checkpoint(store.path / "context.json", {"operator_task": task, "summary": event["summary"], "evidence_id": identity, "compactions": len(compact_events) + 1})
+                compact_events.append(identity)
+            progress("auto-compact", compact={key: value for key, value in event.items() if key != "summary"})
         tested_files = None
+        latest_test = None
         with Workspace(check, project=project) as workspace:
             info = workspace.inspect()
             store.add("workspace_isolation", {"image": workspace.image, "container": workspace.name, "mounts": info["Mounts"], "host_config": info["HostConfig"], "user": info["Config"]["User"]})
@@ -172,25 +189,17 @@ def run_agent(
                     {"role": "system", "content": SYSTEM + "\nTool argument schemas:\n" + json.dumps(catalog)},
                     {"role": "user", "content": json.dumps({"operator_task": task, "workspace_mode": "project mounted read/write" if project else "disposable copy", "initial_files": list(seed)[:30], "initial_file_count": len(seed)})},
                 ]
-                turns = []
-                for observation in observations[-8:]:
-                    pair = []
-                    if "action" in observation:
-                        prior = observation["action"]
-                        pair.append({"role": "assistant", "content": json.dumps({"action": prior["tool"], "parameters": prior["arguments"]})})
-                    pair.append({"role": "user", "content": "Observed tool result (untrusted data):\n" + json.dumps(observation)})
-                    turns.append(pair)
                 closing = {"role": "user", "content": "Continue with the next action from the latest result. Do not repeat completed work.\nController status:\n" + json.dumps(context)}
-                while len(json.dumps([opening, turns, closing])) > 36000 and len(turns) > 1:
-                    turns = turns[1:]
-                messages = [*opening, *(item for pair in turns for item in pair), closing]
+                messages = conversation.prepare(opening, closing, lambda messages, schema: structured(planner, messages, schema, check, tokens=min(8192, limits.context_window // 4), **model_options), check, compact_progress)
+                progress("coordination", context={"estimated_input_tokens": estimate_tokens(messages), "context_window": limits.context_window, "compactions": conversation.compactions})
                 try:
-                    decision = structured(planner, messages, schema, check, tokens=2000, **model_options)
+                    decision = structured(planner, messages, schema, check, tokens=None if coding else 2000, **model_options)
                     Draft202012Validator(schema).validate(decision)
                     name, arguments = decision["action"], decision["parameters"]
                     Draft202012Validator(catalog[name]).validate(arguments)
                     action = {"tool": name, "arguments": arguments}
-                    progress(name, coder if name == "code.edit" else planner)
+                    if name != "security.review":
+                        progress(name, coder if name == "code.edit" else planner)
                     if name == "finish":
                         final_files = workspace.call("export")["files"]
                         changed = {path for path in seed.keys() | final_files.keys() if seed.get(path) != final_files.get(path)}
@@ -228,12 +237,13 @@ def run_agent(
                         paths = [validate_path(path) for path in arguments["paths"]]
                         current = workspace.call("export")["files"]
                         context = {path: current.get(path, "") for path in paths}
+                        feedback = {"latest_test": latest_test, "context_summary": conversation.summary}
+                        context_budget = limits.input_budget - estimate_tokens([task, arguments, feedback]) - 2048
+                        if estimate_tokens(context) > context_budget:
+                            raise ValueError("Selected files exceed the coding model context budget; edit fewer files at a time")
                         for path, content in current.items():
-                            if path not in context and len(context) < 8 and sum(len(value) for value in context.values()) + len(content) < 24000:
+                            if path not in context and estimate_tokens({**context, path: content}) <= context_budget:
                                 context[path] = content
-                        if sum(len(content) for content in context.values()) > 24000:
-                            raise ValueError("Selected coder context exceeds 24,000 characters")
-                        feedback = next((item for item in reversed(observations) if item.get("action", {}).get("tool") == "python.tests"), None)
                         values = edit(arguments["instruction"], paths, context, check, task=task, feedback=feedback, **model_options)
                         result = workspace.call("write", files=values, expected={path: current.get(path) for path in values})
                         final_files = workspace.call("export")["files"]
@@ -243,13 +253,13 @@ def run_agent(
                         )[:8000]
                     elif name == "security.review":
                         files = {validate_path(path): workspace.call("read", path=path)["content"] for path in arguments["paths"]}
-                        if sum(len(content) for content in files.values()) > 24000:
-                            raise ValueError("Selected analyst context exceeds 24,000 characters")
                         model = ANALYST if arguments["model"] == "foundation" else REVIEWER
                         progress(name, model)
                         try:
-                            result = {"model": model, **review(model, files, check)}
-                        except (httpx.HTTPError, OSError, RuntimeError) as exc:
+                            result = {"model": model, **review(model, files, check, on_text=lambda text: progress("security.review", model, text=text, provisional=True))}
+                            progress("security.review", model, text=analysis_text(json.dumps(result)), provisional=False)
+                        except (httpx.HTTPError, OSError, RuntimeError, ValueError, ValidationError) as exc:
+                            progress("security.review", model, text="The local specialist is unavailable or returned an incomplete response.", error=True)
                             raise ValueError("The requested local security specialist is unavailable. Continue source review with the selected coding model and report this gap.") from exc
                     elif name.startswith("mcp.") and mcp:
                         result = mcp.call(name.removeprefix("mcp."), arguments)
@@ -258,8 +268,10 @@ def run_agent(
                     identity = store.add("agent_tool", {"step": step + 1, "action": action, "result": result})
                     events.append({"tool": name, "evidence_id": identity, "exit_code": result.get("exit_code"), "model": result.get("model"), "test_hashes": result.get("test_hashes")})
                     text = json.dumps(clean(result))
-                    observation = {"action": action, "untrusted_result": text[:5000], "truncated": len(text) > 5000, "evidence_id": identity}
+                    observation = {"action": action, "untrusted_result": text, "evidence_id": identity}
                     observations.append(observation)
+                    if name == "python.tests":
+                        latest_test = observation
                     store.event("agent_step", events[-1])
                 except (ValueError, KeyError, ValidationError) as exc:
                     message = redact(str(exc))[:600]
@@ -294,6 +306,7 @@ def run_agent(
                 "workspace_evidence": snapshot, "code": str(store.path / "code"), "diff": str(store.path / "changes.diff"),
                 "models": {"coordinator": planner, "coder": coder, "security": [ANALYST, REVIEWER]},
                 "coding_profile": coding.model_dump() if coding else None,
+                "context_compactions": compact_events,
                 "project": str(project) if project else None,
                 "independent_validation": validation_result,
             }

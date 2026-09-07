@@ -16,13 +16,13 @@ HTTP(S) URLs accept custom hosts, ports and proxy prefixes. An empty path defaul
 
 OpenAI output modes are prompt-only JSON, JSON object and JSON schema. Prompt-only is the broadest default because compatible servers differ in response_format support. The token field can be max_tokens or max_completion_tokens. Anthropic uses a separate system field, merged adjacent turns and anthropic-version 2023-06-01. Responses API-only endpoints and proprietary authentication extensions are not supported by the Chat Completions adapter.
 
-Outputs are parsed and validated against the controller's JSON schema. The reader handles Ollama NDJSON, OpenAI deltas and Anthropic text deltas, rejecting incomplete streams and explicit provider errors. HTTP errors do not expose response bodies. Requests have connection/read deadlines, a 300-second stream budget and a 2 MiB response bound. Generated code and tool output cannot reconfigure providers.
+Outputs are parsed and validated against the controller's JSON schema. The reader handles Ollama NDJSON, OpenAI deltas and Anthropic text deltas, rejecting incomplete streams and explicit provider errors. HTTP errors do not expose response bodies. Requests have connection/read deadlines, a 300-second stream budget and a 16 MiB HTTP response bound (the authenticated child output remains bounded at 8 MiB). Generated code and tool output cannot reconfigure providers.
 
 References: [OpenAI Chat Completions](https://developers.openai.com/api/reference/resources/chat), [Anthropic Messages](https://platform.claude.com/docs/en/api/messages/create), [Anthropic streaming](https://platform.claude.com/docs/en/build-with-claude/streaming).
 
 ## Settings and credentials
 
-The controller atomically persists ~/.argo/models.json with private permissions. ModelSettings contains an active profile name and up to 30 uniquely named CodingProfile objects. Each profile contains name, protocol, base_url, model, credential, output_mode, token_parameter and max_tokens. The credential field is a Hush secret name, never an API key.
+The controller atomically persists ~/.argo/models.json with private permissions. ModelSettings contains an active profile name and up to 30 uniquely named CodingProfile objects. Each profile contains name, protocol, base_url, model, credential, output_mode, token_parameter, optional max_tokens and optional context_window. The credential field is a Hush secret name, never an API key.
 
 The TUI provides profiles, discovery, an explicit synthetic model test and manual entry. Save affects subsequent tasks; an active task's profile is immutable. Model selection does not change the project. Settings are global and used by the CLI; explicit --planner retains a local coordinator override.
 
@@ -65,7 +65,7 @@ Each run stores code snapshots, changes.diff, model metadata, tool records, test
 
 Reopening a mounted-project report does not change the selected directory. Report paths never authorize mounts. Disposable snapshots are verified before restoration. --continue always restores into disposable mode; it never overwrites the current project. /reset clears context without reverting files.
 
-The owned SQL demo always uses disposable mode and independently verifies generated code in a fresh container. Failing-then-passing unchanged regressions, production changes and independent controls gate its completion.
+The internal SQL validation fixture in agent_demo.py always uses disposable mode and independently verifies generated code in a fresh container. Failing-then-passing unchanged regressions, production changes and independent controls gate its completion.
 
 ## External MCP
 
@@ -74,3 +74,15 @@ MCP runs in a separate immutable bridge-network container without the project. I
 Default DeepWiki exposes only read_wiki_structure with four permitted public repositories. Custom public profiles explicitly select endpoint, tools and schemas. Calls must pass both operator and discovered schemas; references and regex constraints are rejected. Responses cannot alter model, mount or permission settings.
 
 Authenticated/stdio MCP and the CVE sidecar remain unimplemented. MCP authentication is separate from coding-provider authentication.
+
+## Model activity and context
+
+The TUI shows coding/coordination, Foundation-Sec and VulnLLM as separate roles. F3 or /models opens live output and readiness. Local adapter callbacks publish provisional user-facing summary/finding fields; hidden thinking fields are ignored. Completed reviews are read back from verified evidence when reopening a run. The former agent-demo command is removed from the public CLI and TUI; its internal validation module remains for regression checks.
+
+Provider limits are read from model metadata and cached per endpoint, model, credential reference and override for five minutes, with a task-start refresh. OpenRouter context_length/top_provider.context_length and max_completion_tokens are supported, alongside compatible context_window, max_input_tokens and max_output_tokens fields. Ollama /api/show identifies model capacity while the configured runtime uses num_ctx=16384 unless overridden. Unknown endpoint metadata produces a visible 16,384-token fallback. Profile overrides preserve manual support for any compatible endpoint. API failures never cause provider substitution.
+
+The context estimate is serialized UTF-8 bytes divided by three, with framing allowance and 10% context headroom; it is not an exact tokenizer. Automatic output budgets use the advertised output ceiling and remaining context. Initial generation output scales with input size and the model window, bounded by the remaining context and advertised maximum. Truncated inference can grow up to that ceiling over at most four requests, without replaying a tool. HTTP 429 retains Retry-After and identifies the shared upstream pool when advertised; Argo does not retry quota failures or switch providers automatically. Token-limit, filtering, malformed JSON, schema, network and timeout errors remain distinguishable through the Hush child without returning private response bodies.
+
+Coordination retains complete observed results instead of clipping every result to 5,000 characters or taking only eight turns. Source selection follows the model's input budget. Independent worker file, transport and execution limits remain enforced. Specialist reviews split oversized source into bounded batches and aggregate suspected findings; a batch may contain a partial file, which limits cross-file reasoning.
+
+At 90% of its input budget, Conversation summarizes older observations in model-sized fragments, retaining the original operator task and recent observations. Completed tool status comes from the controller's ledger, not from model memory. Summaries are untrusted reference material and cannot grant authorization. A successful compaction persists context_compaction evidence, context.json and report context_compactions IDs. A failed or cancelled summary leaves the original in-memory observations intact. Older records remain in evidence. Compaction happens within a run; new tasks do not automatically import prior run memory.

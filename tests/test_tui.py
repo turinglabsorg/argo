@@ -8,6 +8,7 @@ import pytest
 from textual.widgets import Input, Static, TabbedContent, TextArea
 
 from argo.chat import answer, display_text
+from argo.context_budget import ModelLimits
 from argo.contracts import Actions, Engagement, Scope
 from argo.controller import run
 from argo.evidence import EvidenceStore, read_evidence
@@ -17,6 +18,7 @@ from argo.tui import ArgoApp, AuthorizeCase, NewCase, ReportScreen
 
 @pytest.fixture(autouse=True)
 def no_readiness_network(monkeypatch):
+    monkeypatch.setattr("argo.tui.model_limits", lambda *args, **kwargs: ModelLimits())
     monkeypatch.setattr(
         "argo.tui.doctor", lambda: {"ollama": {"local_models": []}, "docker": {"status": "unavailable"}}
     )

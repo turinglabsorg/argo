@@ -24,14 +24,16 @@ from textual.widgets import (
 )
 
 from argo.agent import import_sources, restore, run_agent
-from argo.agent_demo import demo as agent_demo
+from argo.agent_models import ANALYST, REVIEWER
 from argo.chat import answer, display_text
+from argo.context_budget import ModelLimits
 from argo.contracts import Actions, Engagement, Scope
 from argo.controller import Cancelled, run
 from argo.evidence import clean, read_evidence, read_state
 from argo.mcp import default_profile, load_profile
+from argo.model_activity import analysis_text
 from argo.model_dialog import ModelDialog
-from argo.providers import SETTINGS, load_settings
+from argo.providers import SETTINGS, load_settings, model_limits
 from argo.scope import authorize, check_authorization, digest, load, normalize, save
 from argo.services import CYBER_MODELS, demo, doctor, run_path
 from argo.workspace import project_directory
@@ -40,7 +42,7 @@ COMMANDS = [
     "/workspace",
     "/isolated",
     "/agent",
-    "/agent-demo",
+    "/models",
     "/chat",
     "/import",
     "/reset",
@@ -66,9 +68,9 @@ COMMANDS = [
 ]
 HELP = """Project agent      Type a task, or /agent TASK
 Coding model       /model or F2 (local / OpenAI / Anthropic)
+All models         /models or F3 (roles, activity and live responses)
 Mounted project    /workspace [PATH]
 Disposable mode    /isolated
-Agent SQL lab      /agent-demo
 Import project     /import /path/to/project
 Fresh workspace    /reset
 Review code diff   /diff
@@ -98,6 +100,12 @@ The launch directory is mounted read/write: changes go directly into your projec
 /model chooses the coding endpoint and model. /diff shows changes already made.
 Tab completes commands. Up/down recall prompts. Reports and code are saved locally."""
 
+LOGO = r"""    _    ____   ____  ___
+   / \  |  _ \ / ___|/ _ \
+  / _ \ | |_) | |  _| | | |
+ / ___ \|  _ <| |_| | |_| |
+/_/   \_\_| \_\\____|\___/"""
+
 
 class Prompt(Input):
     BINDINGS = [
@@ -108,7 +116,7 @@ class Prompt(Input):
 
     def __init__(self):
         super().__init__(
-            placeholder="Ask Argo a question, or /help for commands…", id="prompt", max_length=8000
+            placeholder="Describe what you want to investigate or change…", id="prompt", max_length=8000
         )
         self.history = []
         self.position = 0
@@ -257,6 +265,7 @@ class ArgoApp(App):
         Binding("f1", "help", "Help"),
         Binding("ctrl+r", "runs", "Runs", priority=True),
         Binding("f2", "coding_model", "Model", priority=True),
+        Binding("f3", "models", "Models", priority=True),
     ]
     CSS_PATH = "data/tui.tcss"
 
@@ -283,20 +292,34 @@ class ArgoApp(App):
         self.project = Path.cwd().resolve() if project is ... else project
         self.settings_path = settings_path
         self.coding = load_settings(settings_path).coding
+        self.model_activity = {}
+        self.model_messages = {}
+        self.active_model = None
+        self.coding_limits = None
 
     def ui(self, selector, widget_type):
         return self.screen_stack[0].query_one(selector, widget_type)
 
     def compose(self) -> ComposeResult:
         yield Static(
-            "  ARGO  /  security console",
+            "  ARGO  /  security & code",
             id="brand",
             markup=False,
         )
+        yield Static("", id="model-roster", markup=False)
         with Horizontal(id="workspace"):
             with TabbedContent(id="views"):
                 with TabPane("Conversation", id="chat-tab"):
-                    yield VerticalScroll(id="conversation")
+                    with VerticalScroll(id="conversation"):
+                        yield Static(Text.assemble((LOGO + "\n\n", "bold #83cec6"), ("Review code. Apply fixes. Verify with Python tests.\n", "bold"), ("Describe what you want to investigate or change.\n\n", "#b4abaa"), ("F2 Settings   F3 Models   /workspace Project   /help", "#83cec6")), id="welcome")
+                with TabPane("Models", id="models-tab"):
+                    with VerticalScroll(id="models-feed"):
+                        yield Static("All model roles · live responses from local analysis", classes="muted")
+                        for role in ("coding", "foundation", "vulnllm"):
+                            with Vertical(classes="model-card"):
+                                yield Static("", id=role + "-identity", classes="model-identity", markup=False)
+                                yield Static("", id=role + "-activity", classes="model-state", markup=False)
+                                yield TextArea("No response yet.", read_only=True, id=role + "-output", classes="model-output", soft_wrap=True)
                 with TabPane("Findings", id="findings-tab"):
                     yield DataTable(id="findings", cursor_type="row", zebra_stripes=True)
                     yield TextArea(
@@ -317,14 +340,15 @@ class ArgoApp(App):
                 yield Static("CASE FILE", classes="sidebar-title")
                 yield Static("No engagement loaded", id="scope-summary", markup=False)
                 yield Button("New audit", id="new-audit")
-                yield Static("ANALYST", classes="sidebar-title")
+                yield Static("MODELS", classes="sidebar-title")
                 yield Static("Foundation-Sec · 8B\nChecking local models…", id="model-summary", markup=False)
+                yield Button("All models · F3", id="all-models")
                 yield Static("ACTIVITY", classes="sidebar-title")
                 yield Static("Ready", id="activity", markup=False)
                 yield Button("Run audit", id="run-audit", variant="primary")
                 yield Button("Stop", id="stop-audit", disabled=True)
                 yield Static(
-                    "/import   Copy project\n/agent-demo  Try isolated agent\n/diff     Review changes\n/help     All commands",
+                    "/workspace  Project folder\n/diff       Review changes\n/runs       Saved results\n/help       All commands",
                     classes="sidebar-help",
                     markup=False,
                 )
@@ -335,16 +359,13 @@ class ArgoApp(App):
     async def on_mount(self):
         self.ui("#findings", DataTable).add_columns("State", "Severity", "Finding", "Location")
         self.ui("#runs", DataTable).add_columns("Created", "Case", "Status", "Findings", "Run ID")
-        self.say(
-            "ARGO",
-            "Describe a task: Argo reads and edits the mounted project directly, then runs Python tests inside Docker.\n\n/model or F2 selects the coding model and any Ollama, OpenAI-compatible or Anthropic-compatible endpoint.\n/workspace shows the selected folder. /diff shows changes. /isolated switches to a disposable workspace.\n/agent-demo runs the owned SQL repair lab; /chat opens advisory discussion.",
-        )
         if self.engagement_path:
             self.open_case(self.engagement_path)
         self.refresh_runs()
         self.refresh_case()
         self.refresh_models()
         self.check_services()
+        self.check_model_limits(self.coding)
         self.action_prompt()
 
     def on_resize(self, event):
@@ -398,14 +419,46 @@ class ArgoApp(App):
         self.ui("#stop-audit", Button).disabled = not self.busy
 
     def refresh_models(self):
-        label = "Foundation-Sec · 8B" if self.model == CYBER_MODELS[0] else "VulnLLM-R · 7B"
-        state = (
-            "Installed locally"
-            if self.model in self.ready_models
-            else ("Not installed" if self.ollama_status == "ready" else "Ollama " + self.ollama_status)
-        )
-        self.ui("#model-summary", Static).update(display_text(label + "\n" + state + "\n\nCODER / COORDINATOR\n" + self.coding.model + "\n" + self.coding.protocol + "\n" + self.coding.base_url + "\n\nCode: Docker / offline"))
-        self.ui("#brand", Static).update(display_text("  ARGO  /  " + self.coding.model + "  ·  " + self.coding.protocol))
+        rows = []
+        for role, model, label in self.model_roles():
+            local = role != "coding" or self.coding.protocol == "ollama"
+            availability = ("Installed locally" if model in self.ready_models else ("Not installed" if self.ollama_status == "ready" else "Ollama " + self.ollama_status)) if local else "Configured endpoint"
+            activity = self.model_activity.get(model, {})
+            state = activity.get("state", "Not used in this run")
+            stage = activity.get("stage", "")
+            status = state + (" · " + stage if stage else "")
+            title = self.model_label(model)
+            rows.append(label.upper() + "\n" + title + "\n" + status)
+            if role == "coding" and self.coding_limits:
+                status += f"\nContext: {self.coding_limits.context_window:,} tokens · Output ceiling: {self.coding.max_tokens or self.coding_limits.max_output_tokens or 'automatic'}\n{self.coding_limits.source}"
+                if activity.get("context"):
+                    context = activity["context"]
+                    status += f"\nInput estimate: {context['estimated_input_tokens']:,} tokens · Auto-compacts: {context['compactions']}"
+            self.ui("#" + role + "-identity", Static).update(display_text(label.upper() + "  /  " + title + "\n" + model))
+            self.ui("#" + role + "-activity", Static).update(display_text(availability + " · " + status))
+            output = self.ui("#" + role + "-output", TextArea)
+            output.set_class(not activity.get("text"), "empty-output")
+            text = display_text(activity.get("text", "Called when needed by the task. No response yet."))
+            if output.text != text:
+                output.load_text(text)
+        self.ui("#model-summary", Static).update(display_text("\n\n".join(rows)))
+        self.ui("#model-roster", Static).update(display_text("  " + "  /  ".join(self.model_label(model) for _, model, _ in self.model_roles())))
+
+    def model_roles(self):
+        return [("coding", self.coding.model, "Coding & coordination"), ("foundation", ANALYST, "Security analysis"), ("vulnllm", REVIEWER, "Vulnerability review")]
+
+    def model_label(self, model):
+        return {ANALYST: "Foundation-Sec 8B", REVIEWER: "VulnLLM-R 7B", "meta/muse-spark-1.3-contributor": "Muse Spark 1.3 Contributor"}.get(model, model.rsplit("/", 1)[-1])
+
+    @work(thread=True, exit_on_error=False)
+    def check_model_limits(self, profile):
+        limits = model_limits(profile)
+        self.call_from_thread(self.limits_result, profile, limits)
+
+    def limits_result(self, profile, limits):
+        if profile == self.coding:
+            self.coding_limits = limits
+            self.refresh_models()
 
     @work(thread=True, exit_on_error=False)
     def check_services(self):
@@ -482,6 +535,8 @@ class ArgoApp(App):
             command, args = parts[0], parts[1:]
             if command == "/help":
                 self.action_help()
+            elif command == "/models" and not args:
+                self.action_models()
             elif command == "/model" and not args:
                 self.action_coding_model()
             elif command == "/workspace" and len(args) <= 1:
@@ -499,9 +554,6 @@ class ArgoApp(App):
                 self.start_chat(prompt[len("/chat "):])
             elif command == "/agent" and args:
                 self.start_agent(prompt[len("/agent "):])
-            elif command == "/agent-demo" and not args:
-                self.begin("Starting the isolated agent lab")
-                self.agent_work(None, True)
             elif command == "/import" and len(args) == 1:
                 self.begin("Copying selected project sources")
                 self.import_project(Path(args[0]))
@@ -595,15 +647,23 @@ class ArgoApp(App):
             self.say("ERROR", str(exc))
 
     def begin(self, status):
+        self.model_activity = {}
+        self.model_messages = {}
+        self.active_model = None
         self.busy = True
         self.cancel_event.clear()
         self.set_status(status)
         self.refresh_case()
+        self.refresh_models()
 
     def finish(self):
+        if self.active_model in self.model_activity and self.model_activity[self.active_model]["state"] == "Working":
+            self.model_activity[self.active_model]["state"] = "Stopped" if self.cancel_event.is_set() else "Finished"
+        self.active_model = None
         self.busy = False
         self.streaming = None
         self.refresh_case()
+        self.refresh_models()
         if self.leaving:
             self.exit()
         else:
@@ -612,6 +672,44 @@ class ArgoApp(App):
     def progress(self, data):
         self.current_run = self.state_root / data["run_id"]
         self.set_status(data["stage"].capitalize() + "  ·  " + data.get("model", data["run_id"][:12]))
+        if data.get("compact", {}).get("phase") == "complete":
+            compact = data["compact"]
+            self.say("ARGO", f"Auto-compact saved: {compact['before_tokens']:,} → {compact['after_tokens']:,} estimated tokens. Latest results and tool evidence retained.")
+        if data.get("model"):
+            if data.get("limits") and data["model"] == self.coding.model:
+                self.coding_limits = ModelLimits.model_validate(data["limits"])
+            if data.get("context"):
+                self.model_activity.setdefault(data["model"], {})["context"] = data["context"]
+            self.model_update(data["model"], data["stage"], data.get("text"), data.get("provisional"), data.get("error", False))
+
+    def model_update(self, model, stage, text=None, provisional=None, error=False):
+        if self.active_model != model:
+            previous = self.model_activity.get(self.active_model, {})
+            if previous.get("state") == "Working":
+                previous["state"] = "Finished"
+            self.model_messages.pop(model, None)
+        self.active_model = model
+        activity = self.model_activity.setdefault(model, {})
+        if text is None and stage in {"security.review", "analysis"}:
+            self.model_messages.pop(model, None)
+            activity.pop("text", None)
+        activity.update(stage=stage, state="Error" if error else ("Response complete" if provisional is False else "Working"))
+        if text:
+            activity["text"] = display_text(text)
+            label = self.model_label(model)
+            suffix = " · provisional analysis" if provisional else (" · analysis incomplete" if error else " · response")
+            widget = self.model_messages.get(model)
+            if widget is None:
+                widget = self.say(label, activity["text"])
+                self.model_messages[model] = widget
+            else:
+                for index in range(len(self.transcript) - 1, -1, -1):
+                    if self.transcript[index][0] == label:
+                        self.transcript[index] = (label, activity["text"])
+                        break
+            widget.update(Text.assemble((label + suffix + "\n", "bold #83cec6"), activity["text"]))
+            self.call_after_refresh(self.ui("#conversation", VerticalScroll).scroll_end, animate=False)
+        self.refresh_models()
 
     @work(thread=True, exit_on_error=False)
     def audit(self, command, models, scanners, previous):
@@ -675,7 +773,7 @@ class ArgoApp(App):
         self.finish()
 
     @work(thread=True, exit_on_error=False)
-    def agent_work(self, prompt, lab=False):
+    def agent_work(self, prompt):
         try:
             options = {
                 "profile": self.agent_profile, "use_mcp": self.agent_mcp,
@@ -683,7 +781,7 @@ class ArgoApp(App):
                 "cancelled": self.cancel_event.is_set,
                 "on_progress": lambda data: self.call_from_thread(self.progress, data),
             }
-            result = agent_demo(self.state_root, **options) if lab else run_agent(prompt, self.state_root, seed=None if self.project else self.agent_seed, project=self.project, **options)
+            result = run_agent(prompt, self.state_root, seed=None if self.project else self.agent_seed, project=self.project, **options)
             self.call_from_thread(self.agent_done, result)
         except Exception as exc:
             self.call_from_thread(self.task_failed, display_text(str(exc)))
@@ -724,8 +822,9 @@ class ArgoApp(App):
                     except (OSError, ValueError):
                         evidence.append({"id": identity, "status": "unavailable or integrity check failed"})
             context["evidence"] = evidence[:4]
-        self.begin("Thinking · " + self.model)
-        self.streaming = self.say("ARGO", "Thinking…")
+        self.begin("Preparing response · " + self.model_label(self.model))
+        self.model_update(self.model, "Advisory response")
+        self.streaming = self.say(self.model_label(self.model), "Preparing response…")
         self.chat(prompt, context)
 
     def check_cancelled(self):
@@ -749,7 +848,9 @@ class ArgoApp(App):
 
     def chat_update(self, text):
         if self.streaming and text:
-            self.streaming.update(Text.assemble(("ARGO\n", "bold #83cec6"), display_text(text)))
+            self.streaming.update(Text.assemble((self.model_label(self.model) + "\n", "bold #83cec6"), display_text(text)))
+            self.model_activity[self.model]["text"] = display_text(text)
+            self.refresh_models()
             self.ui("#conversation", VerticalScroll).scroll_end(animate=False)
 
     def chat_done(self, prompt, response):
@@ -822,6 +923,17 @@ class ArgoApp(App):
         try:
             path = run_path(self.state_root, identity)
             report = json.loads((path / "report.json").read_text())
+            if self.current_run != path:
+                self.model_activity = {}
+                self.model_messages = {}
+            analyses = list(report.get("analysis", []))
+            for item in report.get("tools", []):
+                if item.get("tool") == "security.review":
+                    analyses.append(read_evidence(path, item["evidence_id"])["data"]["result"])
+            for analysis in analyses:
+                if analysis.get("model"):
+                    self.model_activity[analysis["model"]] = {"state": "Saved response", "stage": "Security analysis", "text": analysis_text(json.dumps(analysis))}
+            self.refresh_models()
             self.report_data = report
             self.current_run = path
             self.history = []
@@ -853,7 +965,9 @@ class ArgoApp(App):
 
     @on(Button.Pressed)
     def button_clicked(self, event):
-        if event.button.id == "coding-settings":
+        if event.button.id == "all-models":
+            self.action_models()
+        elif event.button.id == "coding-settings":
             self.action_coding_model()
         elif event.button.id == "new-audit":
             self.dispatch("/new")
@@ -870,9 +984,15 @@ class ArgoApp(App):
         if not self.busy and not isinstance(self.screen, ModalScreen):
             self.push_screen(ModelDialog(self.settings_path), self.coding_selected)
 
+    def action_models(self):
+        if not isinstance(self.screen, ModalScreen):
+            self.ui("#views", TabbedContent).active = "models-tab"
+
     def coding_selected(self, profile):
         if profile:
             self.coding = profile
+            self.coding_limits = None
+            self.check_model_limits(profile)
             self.refresh_models()
             self.say("ARGO", f"Coding and coordination: {profile.model}\n{profile.protocol} · {profile.base_url}\nSaved for subsequent tasks. Project selection is unchanged.")
         self.action_prompt()

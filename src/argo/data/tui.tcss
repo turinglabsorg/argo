@@ -88,3 +88,12 @@ ModalScreen { align: center middle; background: #201d1d 80%; }
 #model-fields Label { margin-top: 0; color: #b4abaa; }
 #coding-result { height: auto; max-height: 3; margin-top: 1; color: #83cec6; }
 #model-dialog .dialog-actions Button { min-width: 10; width: 1fr; margin-right: 1; }
+
+#model-roster { height: auto; max-height: 2; padding: 0 2; color: #b4abaa; }
+#welcome { height: auto; margin-bottom: 1; }
+#models-feed { height: 1fr; padding: 1; }
+.model-card { height: auto; margin-top: 1; padding: 0 1; border-left: solid #514a49; }
+.model-identity { height: auto; color: #83cec6; text-style: bold; }
+.model-state { height: auto; color: #b4abaa; margin-bottom: 1; }
+.model-output { height: 5; min-height: 2; border: none; }
+.model-output.empty-output { height: 2; }

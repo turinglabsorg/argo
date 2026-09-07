@@ -6,7 +6,6 @@ import sys
 from pathlib import Path
 
 from argo.agent import import_sources, restore, run_agent
-from argo.agent_demo import demo as agent_demo
 from argo.agent_models import MODELS
 from argo.contracts import Actions, Engagement, Scope
 from argo.controller import run
@@ -21,26 +20,24 @@ from argo.tui import ArgoApp
 def main():
     os.umask(0o077)
     parser = argparse.ArgumentParser(
-        prog="argo", description="Local security audits with reproducible evidence"
+        prog="argo", description="Review code, apply fixes and verify security findings"
     )
     parser.add_argument("--state-dir", type=Path, default=DEFAULT_STATE)
     commands = parser.add_subparsers(dest="command")
     commands.add_parser("tui").add_argument("file", nargs="?", type=Path)
     commands.add_parser("doctor")
     commands.add_parser("runs")
-    for name in ("agent", "agent-demo"):
-        sub = commands.add_parser(name, help="Run the agent in an offline Docker workspace")
-        if name == "agent":
-            sub.add_argument("task")
-            inputs = sub.add_mutually_exclusive_group()
-            inputs.add_argument("--import", dest="source", type=Path, help="Copy sanitized project sources; originals stay outside the worker")
-            inputs.add_argument("--continue", dest="previous", help="Continue the verified workspace of a saved run")
-            inputs.add_argument("--project", type=Path, help="Mount this directory read/write (default: current directory)")
-            inputs.add_argument("--isolated", action="store_true", help="Use a disposable workspace without a project mount")
-        sub.add_argument("--no-mcp", action="store_true")
-        sub.add_argument("--mcp-profile", type=Path)
-        sub.add_argument("--max-steps", type=int, default=24)
-        sub.add_argument("--planner", choices=MODELS, help="Explicit local coordinator override; otherwise use the TUI-selected coding profile")
+    sub = commands.add_parser("agent", help="Run the agent in an offline Docker workspace")
+    sub.add_argument("task")
+    inputs = sub.add_mutually_exclusive_group()
+    inputs.add_argument("--import", dest="source", type=Path, help="Copy sanitized project sources; originals stay outside the worker")
+    inputs.add_argument("--continue", dest="previous", help="Continue the verified workspace of a saved run")
+    inputs.add_argument("--project", type=Path, help="Mount this directory read/write (default: current directory)")
+    inputs.add_argument("--isolated", action="store_true", help="Use a disposable workspace without a project mount")
+    sub.add_argument("--no-mcp", action="store_true")
+    sub.add_argument("--mcp-profile", type=Path)
+    sub.add_argument("--max-steps", type=int, default=24)
+    sub.add_argument("--planner", choices=MODELS, help="Explicit local coordinator override; otherwise use the TUI-selected coding profile")
     commands.add_parser("mcp-tools").add_argument("--profile", type=Path)
     init = commands.add_parser("init")
     init.add_argument("file", type=Path)
@@ -85,7 +82,7 @@ def main():
             return 0
         if args.command == "doctor":
             output = doctor()
-        elif args.command in {"agent", "agent-demo"}:
+        elif args.command == "agent":
             options = {
                 "use_mcp": not args.no_mcp,
                 "profile": load_profile(args.mcp_profile) if args.mcp_profile else None,
@@ -96,12 +93,9 @@ def main():
                 options["planner"] = args.planner
             else:
                 options["coding"] = load_settings().coding
-            if args.command == "agent-demo":
-                output = agent_demo(args.state_dir, **options)
-            else:
-                seed = import_sources(args.source) if args.source else (restore(run_path(args.state_dir, args.previous)) if args.previous else {})
-                project = None if args.source or args.previous or args.isolated else (args.project or Path.cwd())
-                output = run_agent(args.task, args.state_dir, seed=seed, project=project, **options)
+            seed = import_sources(args.source) if args.source else (restore(run_path(args.state_dir, args.previous)) if args.previous else {})
+            project = None if args.source or args.previous or args.isolated else (args.project or Path.cwd())
+            output = run_agent(args.task, args.state_dir, seed=seed, project=project, **options)
         elif args.command == "mcp-tools":
             client = MCPClient(load_profile(args.profile) if args.profile else default_profile())
             output = {"server": client.profile.name, "tools": client.discover()}

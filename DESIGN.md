@@ -25,18 +25,19 @@ Inherit the user's terminal monospace font. Do not download fonts or images. Use
 
 ## Layout and interaction
 
-- One-line brand bar: ARGO, selected coding model and endpoint scope.
+- Brand bar names all three model roles. Keep the selected coder, Foundation-Sec and VulnLLM visible at both terminal widths, with compact labels when space is limited.
 - Conversation occupies the flexible left column. Use distinct speaker labels and whitespace, not a box around every message.
 - A 34-cell case sidebar shows scope, authorization, models, and run status. Hide below 100 columns; `/scope` remains available.
-- Chat, Findings, and Runs tabs keep reports and older sessions accessible.
+- Conversation, Models, Findings, and Runs tabs separate work, model activity and saved evidence. F3 or /models opens the model roster; F2 continues to configure the coder.
 - A bottom input accepts prose and explicit slash commands. Tab completes commands; up/down recall in-memory prompt history. Enter submits. Escape requests cancellation. Ctrl+L focuses input. Ctrl+Q exits after stopping any active task.
-- First launch explains natural-language tasks, `/import`, `/diff`, `/agent-demo`, and advisory `/chat`. Legacy `/new` and `/open` manage engagements; authorization displays the exact contract before a separate operator action.
+- First launch shows a five-line ASCII ARGO wordmark in the existing teal accent, a short security-and-coding description, and essential shortcuts. Keep the whole introduction readable at 80x24. Remove the agent-demo command from the TUI, CLI, help and current command documentation.
+- Show each model's role, identity, availability and current activity. Stream the user-facing summaries and findings of local reviews into named conversation messages and the Models tab. Clearly label partial output as provisional and final security findings as suspected. Never display raw thinking fields or claim that an available model has participated before it is called.
 - Findings use a table and a detail pane showing provenance, evidence identifiers, and remediation. Selecting a finding supplies context for the next chat question.
 - Plain text starts the isolated agent. Show its current tool/model and keep the offline code boundary visible. `/chat` is explicitly advisory. Tool calls cannot alter scope, MCP policy or host access.
 - The launch directory is mounted read/write by default; display its path and direct-write status. `/workspace PATH` changes the selected directory. `/isolated` selects a disposable copy, while `/import` copies sources into that mode. `/diff` shows the changes already made. Resuming a report never mounts a path from that report automatically.
-- `/model` and F2 open coding settings: saved profile, protocol (Ollama, OpenAI-compatible, Anthropic-compatible), base URL, model ID, optional Hush credential name and JSON mode. Discover models or enter any model ID. Save applies to subsequent coding and coordination calls and persists globally. Keep the current workspace unchanged when switching models. Use a scrollable form with fixed Save/Cancel controls on narrow terminals.
+- `/model` and F2 open coding settings: saved profile, protocol (Ollama, OpenAI-compatible, Anthropic-compatible), base URL, model ID, optional Hush credential name, JSON mode and optional context/output token overrides. Blank limits mean API-driven budgets. F3 shows the limit source, estimated input use and auto-compaction count; completed compactions appear in the conversation. Discover models or enter any model ID. Save applies to subsequent coding and coordination calls and persists globally. Keep the current workspace unchanged when switching models. Use a scrollable form with fixed Save/Cancel controls on narrow terminals.
 - Keep terminal interaction responsive with background workers. Stream chat output, expose current audit stage, and preserve completed reports under the existing private run directory.
-- Test at 140×44 and 80×24 cells with Textual Pilot, including form submission, cancellation, resume, and the isolated demo.
+- Test at 140×44 and 80×24 cells with Textual Pilot, including the welcome screen, all model roles, live analysis, form submission, cancellation and resume.
 
 ## Open-source choice
 

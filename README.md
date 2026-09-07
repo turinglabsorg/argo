@@ -1,10 +1,14 @@
 # Argo
 
-A cybersecurity agent that edits the project you open, runs code in Docker, and uses your choice of local or remote coding model.
+Review code. Investigate security issues. Apply fixes and verify them.
+
+Argo is a terminal agent with specialist local security models and your choice of local or remote coding endpoint. It edits the project you open and executes Python tests in Docker.
 
 Launch Argo from a project directory: that directory is mounted read/write, and edits immediately change its files. F2 or /model selects any model ID through an Ollama, OpenAI-compatible or Anthropic-compatible endpoint. The selected model coordinates tools and writes code. Optional local Foundation-Sec and VulnLLM provide specialist reviews.
 
 Code executes in a non-root, offline container with only the selected project mounted. Provider credentials, the Docker socket and other host directories are not mounted. Files inside the selected project are accessible to its code. A separate immutable broker connects to configured remote MCP tools.
+
+![Argo terminal welcome](docs/assets/welcome.svg)
 
 ## Install
 
@@ -51,11 +55,21 @@ Profiles persist in ~/.argo/models.json and are also used by the CLI. Saving doe
 
 OpenAI-compatible profiles use Chat Completions; Anthropic-compatible profiles use Messages. HTTP(S) hosts, custom ports, proxy prefixes and arbitrary model IDs are supported. URLs can end at the API root or the full generation path. OpenAI profiles offer prompt-only JSON, JSON object and JSON schema modes, plus max_tokens or max_completion_tokens. Unsupported capabilities produce visible errors; Argo does not silently switch providers.
 
-OpenRouter was validated with base URL https://openrouter.ai/api/v1, model meta/muse-spark-1.3-contributor, JSON schema mode and max_tokens. The connection probe allows 2,048 output tokens so reasoning can finish before producing JSON. The [Contributor tier](https://openrouter.ai/meta/muse-spark-1.3-contributor) permits prompts and outputs to be used to improve Meta's products.
+OpenRouter was validated with base URL https://openrouter.ai/api/v1, model meta/muse-spark-1.3-contributor, JSON schema mode and max_tokens. The connection probe starts with 2,048 output tokens and can increase the allowance on truncation within the selected model budget. The [Contributor tier](https://openrouter.ai/meta/muse-spark-1.3-contributor) permits prompts and outputs to be used to improve Meta's products.
 
 For authentication, install [Hush](https://github.com/turinglabsorg/hush), import the credential from Bitwarden with hush pull --name NAME, then enter only NAME in the form. Argo invokes hush run --redact and injects the key into a fixed provider process. API keys are never saved in model settings or sent to code workers. Leave the credential field empty for endpoints without authentication. Selecting a remote endpoint sends task context and selected source to it.
 
 ![Coding endpoint and model selection](docs/assets/model-settings.svg)
+
+## Context and auto-compact
+
+Argo reads the selected model's limits from its API, caches them for five minutes and refreshes them at the start of each task. OpenRouter reports **1,048,576 context tokens** and **943,718 maximum completion tokens** for Muse Spark 1.3 Contributor (verified September 7, 2026). The output ceiling uses the advertised maximum and remaining context. The initial allowance scales with prompt size and the model window, growing on truncation without replaying tools; there is no fixed 2,000-token coordinator ceiling. F2 allows optional context/output overrides; leave both blank for automatic limits.
+
+Before each coordination request, Argo estimates token use from UTF-8 text and retains a 10% safety margin plus a response reserve. This is an estimate, not the provider's exact tokenizer count. At 90% of the input budget, auto-compact summarizes older history, retaining the original task, the deterministic completed-tool ledger and recent results. It saves a verified compaction record and context.json before the next action. Failed compaction does not discard history or replay tools. F3 shows the context limit, estimated use and compaction count.
+
+Endpoints that do not publish context limits use an explicitly labelled 16,384-token fallback; set an override in F2 when the endpoint requires it. Local Ollama roles run with a 16,384-token context for memory usage. Large specialist reviews are split into source batches; cross-batch findings still require verification.
+
+Reports, summaries and evidence persist. A new task currently starts a new conversation over the selected project or restored files; /resume reopens results, including local model responses, and does not replay actions or automatically load old conversation memory.
 
 ## Edit the project you open
 
@@ -88,7 +102,7 @@ The TUI uses [Textual](https://github.com/Textualize/textual) under MIT.
 | Copy sanitized sources into disposable mode | /import PATH |
 | Reset context while retaining the selected project | /reset |
 | Review changes already made | /diff |
-| Run the owned SQL repair lab | /agent-demo |
+| See all model roles and live analysis | F3 or /models |
 | Configure remote MCP | /mcp, /mcp off, /mcp PROFILE.json |
 | Discuss findings without execution | /chat QUESTION |
 | Choose the separate advisory chat model | /model foundation or /model vulnllm |
@@ -97,7 +111,7 @@ The TUI uses [Textual](https://github.com/Textualize/textual) under MIT.
 | Service readiness | /doctor |
 | Stop active work | Escape or /stop |
 
-Tab completes commands; up/down recall prompts. Ctrl+L focuses input, Ctrl+R opens runs, F1 shows help, and Ctrl+Q stops work before closing. The sidebar hides below 100 columns; model settings remain available through F2.
+Tab completes commands; up/down recall prompts. Ctrl+L focuses input, Ctrl+R opens runs, F1 shows help, and Ctrl+Q stops work before closing. The sidebar hides below 100 columns. All three models remain visible in the header; F3 opens their roles, activity and live responses. Local analysis streams as provisional summaries and suspected findings, then becomes a saved response. Raw model thinking is not displayed.
 
 Resuming a mounted-project report does not change the selected directory. Disposable runs restore verified files into a new disposable workspace. Report contents never grant permission to mount another path, and interrupted side effects are never replayed.
 
@@ -111,7 +125,6 @@ Authenticated/stdio MCP is not implemented. Coding-provider authentication is se
 
 ## Security labs and legacy audits
 
-    argo agent-demo
 
 This owned SQLite lab asks the models to create a failing regression, apply a parameterized-query fix and rerun unchanged tests. A separate container checks positive, missing, apostrophe, injection and data-integrity cases. Model-generated tests alone are not independent security proof.
 

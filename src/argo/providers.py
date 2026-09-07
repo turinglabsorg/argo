@@ -10,14 +10,45 @@ from typing import Literal
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
-from jsonschema import Draft202012Validator
+from jsonschema import Draft202012Validator, ValidationError
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from argo.context_budget import ModelLimits
 from argo.evidence import clean, private_dir
 from argo.sandbox import command
 
 SETTINGS = Path.home() / ".argo" / "models.json"
 DEFAULT_MODEL = "argo-coder:30b-a3b"
+LIMIT_CACHE = {}
+
+
+class ProviderHTTPError(RuntimeError):
+    def __init__(self, status, retry_after=None, shared_pool=False):
+        self.status = status
+        self.retry_after = retry_after
+        self.shared_pool = shared_pool
+        if status == 429:
+            message = "Upstream shared provider pool is rate-limited" if shared_pool else "Provider rate limit reached"
+            if retry_after is not None:
+                message += f"; retry after {retry_after} seconds"
+        else:
+            message = {401: "Provider rejected authentication", 403: "Provider denied this request", 402: "Provider credit or spending limit reached", 404: "Endpoint or model not found"}.get(status, "Provider request failed; check the endpoint, model and JSON mode")
+        super().__init__(f"HTTP {status}: {message}")
+
+
+class ProviderResponseError(ValueError):
+    MESSAGES = {
+        "output_limit": "Provider response was truncated: output token limit reached",
+        "filtered": "Provider filtered the response",
+        "incomplete": "Provider stream ended before completion",
+        "invalid_json": "Provider returned invalid JSON",
+        "invalid_schema": "Provider response does not match the requested JSON schema",
+        "invalid_format": "Provider returned an unsupported response format",
+    }
+
+    def __init__(self, code):
+        self.code = code if code in self.MESSAGES else "invalid_format"
+        super().__init__(self.MESSAGES[self.code])
 
 
 class CodingProfile(BaseModel):
@@ -29,7 +60,8 @@ class CodingProfile(BaseModel):
     credential: str = Field(default="", pattern=r"^[a-zA-Z0-9_-]{0,80}$")
     output_mode: Literal["prompt", "json_object", "json_schema"] = "prompt"
     token_parameter: Literal["max_tokens", "max_completion_tokens"] = "max_tokens"
-    max_tokens: int = Field(default=8192, ge=256, le=65536)
+    max_tokens: int | None = Field(default=None, ge=256, le=100_000_000)
+    context_window: int | None = Field(default=None, ge=1024, le=100_000_000)
 
     @model_validator(mode="after")
     def validate_endpoint(self):
@@ -100,11 +132,19 @@ def save_profile(profile, path=SETTINGS):
 
 
 def parse_json(content, schema):
+    if not isinstance(content, str):
+        raise ProviderResponseError("invalid_format")
     text = content.strip()
     if text.startswith("```"):
         text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text).strip()
-    data = json.loads(text)
-    Draft202012Validator(schema).validate(data)
+    try:
+        data = json.loads(text)
+    except ValueError as exc:
+        raise ProviderResponseError("invalid_json") from exc
+    try:
+        Draft202012Validator(schema).validate(data)
+    except ValidationError as exc:
+        raise ProviderResponseError("invalid_schema") from exc
     return data
 
 
@@ -123,6 +163,10 @@ def request(profile, operation, messages=None, schema=None, tokens=4096, check=l
         raise RuntimeError("Hush could not run the provider. Check the credential name and vault readiness.")
     result = json.loads(output)
     if "error" in result:
+        if result.get("code") in ProviderResponseError.MESSAGES:
+            raise ProviderResponseError(result["code"])
+        if result.get("code") == "http":
+            raise ProviderHTTPError(result["status"], result.get("retry_after"), result.get("shared_pool", False))
         raise RuntimeError(result["error"])
     return result["result"]
 
@@ -137,18 +181,37 @@ def exchange(profile, operation, messages=None, schema=None, tokens=4096, check=
         headers["Authorization"] = "Bearer " + key
     started = time.monotonic()
     with httpx.Client(timeout=httpx.Timeout(60, connect=5), trust_env=False, follow_redirects=False) as client:
-        if operation == "models":
+        if operation == "limits" and profile.protocol == "ollama":
+            url = profile.url().removesuffix("/api/chat") + "/api/show"
+            with client.stream("POST", url, headers=headers, json={"model": profile.model}) as response:
+                data = bounded_json(response, check, started)
+            advertised = [positive_int(value) for name, value in data.get("model_info", {}).items() if name.endswith(".context_length")]
+            context = min([16384, *(value for value in advertised if value)])
+            return ModelLimits(context_window=context, max_output_tokens=min(4096, context // 2), source="Ollama API; active num_ctx capped at 16,384 for local memory").model_dump()
+        if operation in {"models", "limits"}:
             with client.stream("GET", profile.url("models"), headers=headers) as response:
                 data = bounded_json(response, check, started)
             rows = data.get("models", []) if profile.protocol == "ollama" else data.get("data", [])
+            if not isinstance(rows, list):
+                raise ProviderResponseError("invalid_format")
+            if operation == "limits":
+                row = next((row for row in rows if isinstance(row, dict) and row.get("id") == profile.model), {})
+                top = row.get("top_provider") or {}
+                if not isinstance(top, dict):
+                    raise ProviderResponseError("invalid_format")
+                contexts = [positive_int(row.get(name)) for name in ("context_length", "context_window", "max_input_tokens")]
+                contexts.append(positive_int(top.get("context_length")))
+                context = min((value for value in contexts if value), default=None)
+                output = positive_int(top.get("max_completion_tokens")) or positive_int(row.get("max_output_tokens")) or positive_int(row.get("max_completion_tokens"))
+                return ModelLimits(context_window=context or 16384, max_output_tokens=output, source="Model API" if context else "Fallback: endpoint did not advertise context length").model_dump()
             return sorted({row.get("name") if profile.protocol == "ollama" else row.get("id") for row in rows if isinstance(row, dict) and isinstance(row.get("name") if profile.protocol == "ollama" else row.get("id"), str)})
         messages = clean(messages or [])
         instruction = "Return only a JSON object matching this schema, without prose or markdown:\n" + json.dumps(schema)
         messages = [{"role": "system", "content": instruction}, *messages]
-        limit = min(tokens, profile.max_tokens)
+        limit = min(tokens, profile.max_tokens or tokens)
         body = {"model": profile.model, "messages": messages, "stream": True}
         if profile.protocol == "ollama":
-            body.update(format=schema, think=False, keep_alive="5m", options={"temperature": 0, "num_ctx": 16384, "num_predict": limit})
+            body.update(format=schema, think=False, keep_alive="5m", options={"temperature": 0, "num_ctx": profile.context_window or 16384, "num_predict": limit})
         elif profile.protocol == "openai":
             body[profile.token_parameter] = limit
             if profile.output_mode == "json_object":
@@ -169,25 +232,57 @@ def exchange(profile, operation, messages=None, schema=None, tokens=4096, check=
             body["messages"] = turns
         with client.stream("POST", profile.url(), headers=headers, json=body) as response:
             if response.status_code >= 300:
-                raise RuntimeError(f"{profile.protocol} endpoint returned HTTP {response.status_code}; check URL, model, credential and JSON mode")
-            content = decode_generation(response, profile.protocol, check, started)
+                raise http_error(response)
+            try:
+                content = decode_generation(response, profile.protocol, check, started)
+            except (KeyError, IndexError, TypeError) as exc:
+                raise ProviderResponseError("invalid_format") from exc
+            except json.JSONDecodeError as exc:
+                raise ProviderResponseError("invalid_json") from exc
     return parse_json(content, schema)
 
 
 def budget(check, started, received):
     check()
-    if received > 2 * 1024**2 or time.monotonic() - started > 300:
+    if received > 16 * 1024**2 or time.monotonic() - started > 300:
         raise TimeoutError("Provider response budget exceeded")
 
 
 def bounded_json(response, check, started):
     if response.status_code >= 300:
-        raise RuntimeError(f"Provider returned HTTP {response.status_code}; check endpoint and credentials")
+        raise http_error(response)
     content = bytearray()
     for part in response.iter_bytes():
         content.extend(part)
         budget(check, started, len(content))
-    return json.loads(content)
+    try:
+        data = json.loads(content)
+    except ValueError as exc:
+        raise ProviderResponseError("invalid_json") from exc
+    if not isinstance(data, dict):
+        raise ProviderResponseError("invalid_format")
+    return data
+
+
+def http_error(response):
+    retry_after, shared_pool = None, False
+    value = response.headers.get("retry-after", "")
+    if value.isdigit():
+        retry_after = min(int(value), 86400)
+    if response.status_code == 429:
+        content = bytearray()
+        for chunk in response.iter_bytes():
+            content.extend(chunk)
+            if len(content) > 64000:
+                break
+        try:
+            metadata = json.loads(content).get("error", {}).get("metadata", {})
+            shared_pool = metadata.get("limit_source") == "upstream_provider_shared_pool"
+            if retry_after is None:
+                retry_after = positive_int(metadata.get("retry_after_seconds"))
+        except (ValueError, AttributeError, TypeError):
+            pass
+    return ProviderHTTPError(response.status_code, retry_after, shared_pool)
 
 
 def decode_generation(response, protocol, check, started):
@@ -195,11 +290,11 @@ def decode_generation(response, protocol, check, started):
         data = bounded_json(response, check, started)
         if protocol == "anthropic":
             if data.get("stop_reason") == "max_tokens":
-                raise ValueError("Provider exhausted its output token budget")
+                raise ProviderResponseError("output_limit")
             return "".join(item.get("text", "") for item in data["content"] if item["type"] == "text")
         choice = data["choices"][0]
         if choice.get("finish_reason") in {"length", "content_filter"}:
-            raise ValueError("Provider response was truncated or filtered")
+            raise ProviderResponseError("output_limit" if choice.get("finish_reason") == "length" else "filtered")
         return choice["message"]["content"]
     content, received, done, event = "", 0, False, []
     for line in response.iter_lines():
@@ -229,7 +324,7 @@ def decode_generation(response, protocol, check, started):
             for choice in data.get("choices", []):
                 content += choice.get("delta", {}).get("content") or ""
                 if choice.get("finish_reason") in {"length", "content_filter"}:
-                    raise ValueError("Provider response was truncated or filtered")
+                    raise ProviderResponseError("output_limit" if choice.get("finish_reason") == "length" else "filtered")
                 done = done or choice.get("finish_reason") == "stop"
         else:
             kind = data.get("type")
@@ -238,17 +333,52 @@ def decode_generation(response, protocol, check, started):
             if kind == "content_block_delta" and data["delta"].get("type") == "text_delta":
                 content += data["delta"]["text"]
             if kind == "message_delta" and data.get("delta", {}).get("stop_reason") == "max_tokens":
-                raise ValueError("Provider exhausted its output token budget")
+                raise ProviderResponseError("output_limit")
             done = done or kind == "message_stop"
     check()
     if not done:
-        raise ValueError("Provider stream ended before completion")
+        raise ProviderResponseError("incomplete")
     return content
 
 
-def generate(profile, messages, schema, check=lambda: None, tokens=4096):
-    result = request(profile, "generate", messages, schema, tokens, check)
-    Draft202012Validator(schema).validate(result)
+def positive_int(value):
+    return value if isinstance(value, int) and not isinstance(value, bool) and 0 < value <= 100_000_000 else None
+
+
+def model_limits(profile, check=lambda: None, refresh=False):
+    cache_key = (profile.protocol, profile.base_url, profile.model, profile.credential, profile.context_window)
+    cached = LIMIT_CACHE.get(cache_key)
+    if cached and not refresh and time.monotonic() - cached[0] < 300:
+        return cached[1]
+    check()
+    try:
+        limits = ModelLimits.model_validate(request(profile, "limits", check=check))
+    except (httpx.HTTPError, OSError, RuntimeError, ValueError, TimeoutError):
+        check()
+        limits = ModelLimits(source="Fallback: model limits unavailable from endpoint")
+    if profile.context_window:
+        limits = limits.model_copy(update={"context_window": profile.context_window, "source": "User context override"})
+    LIMIT_CACHE[cache_key] = (time.monotonic(), limits)
+    return limits
+
+
+def generate(profile, messages, schema, check=lambda: None, tokens=None):
+    limits = model_limits(profile, check)
+    allowed = limits.output_budget(messages, schema, profile.max_tokens)
+    current = min(tokens, allowed) if tokens else limits.initial_output(messages, schema, profile.max_tokens)
+    for attempt in range(4):
+        check()
+        try:
+            result = request(profile, "generate", messages, schema, current, check)
+            break
+        except ProviderResponseError as exc:
+            if exc.code != "output_limit" or current >= allowed or attempt == 3:
+                raise
+            current = min(allowed, current * 4) if attempt < 2 else allowed
+    try:
+        Draft202012Validator(schema).validate(result)
+    except ValidationError as exc:
+        raise ProviderResponseError("invalid_schema") from exc
     return result
 
 

@@ -145,3 +145,21 @@ Conversation history remains in memory; saved audit reports persist under the pr
 - The terminal command was installed with dependency constraints exported from the lockfile.
 
 The larger labeled/held-out evaluation corpus and its proposed precision/recall release gates remain unmeasured. A first real engagement still needs an operator-selected repository or staging origin.
+
+## September 7: dynamic context, compaction and model visibility
+
+The full local suite passed **121 tests**, including provider HTTP contracts, Hush worker error classification, Docker mounts, source batching, partial local-model output, narrow/wide TUI interaction, preservation on cancellation/checkpoint failure and persisted compaction. Compaction integration exercises two successive checkpoints in one run. No user project was replayed during validation.
+
+Authenticated OpenRouter metadata for meta/muse-spark-1.3-contributor reported context_length **1,048,576** and top_provider.max_completion_tokens **943,718**. Requesting almost the entire advertised completion allowance returned upstream_provider_shared_pool HTTP 429 with Retry-After 60; a 2,048-token diagnostic and the final adaptive 32,768-token initial request both succeeded. Argo now uses the full context window while scaling the initial output request, retaining the advertised ceiling for growth on truncation. This observed rate limit is not proof of what caused an older, generically logged failure.
+
+An actual Muse compaction test used an unsaved 16,384-token profile override to exercise the threshold on synthetic history. It reduced approximately **26,897 to 337 estimated tokens**, preserving the task and recent result. The operator's saved profile remains automatic and reads the million-token window from the API.
+
+Live mounted repair run **6320518f378c4c959806896e0b10cf3b** used Muse with automatic limits and a temporary calculator project. The unchanged regression failed, code.edit ran once, and pytest then passed. A fresh independent container also passed the original test. Evidence integrity was verified. The affected user project OmniPass was not rerun or modified by this validation.
+
+Both installed specialists were exercised through the TUI against a synthetic parameterized SQLite query. Foundation-Sec emitted **14** live updates and VulnLLM **15**. Successful structured responses verify streaming and display; they do not validate findings. In particular, Foundation-Sec reported a suspected SQL injection against this parameterized negative control, so the output must remain a hypothesis. All roles are visible in the header, and F3 exposes their responses. Welcome and Models layouts were checked at 140x44 and 80x24.
+
+![Terminal welcome](assets/welcome.svg)
+
+![Model roles](assets/model-roster.svg)
+
+Limits: token usage is estimated, not counted by the exact model tokenizer. Auto-compaction is within a run; summaries persist, but new tasks do not automatically import prior conversation memory. File snapshot, transport, execution time and local-memory bounds are separate from the selected model's context capacity.
