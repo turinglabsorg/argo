@@ -163,3 +163,11 @@ Both installed specialists were exercised through the TUI against a synthetic pa
 ![Model roles](assets/model-roster.svg)
 
 Limits: token usage is estimated, not counted by the exact model tokenizer. Auto-compaction is within a run; summaries persist, but new tasks do not automatically import prior conversation memory. File snapshot, transport, execution time and local-memory bounds are separate from the selected model's context capacity.
+
+## Streaming reasoning and recorded findings
+
+The full local suite passed **138 tests**, including HTTP-to-Docker findings registration, unknown-evidence and missing-path rejection, native reasoning delivered before the final answer, bounded truncation retry, malformed/incomplete streams, cancellation and legacy findings recovery. Follow-up TUI/registration checks passed **19 tests** after adjusting table column widths; actual saved runs were inspected at 140x44 and 80x24.
+
+A live Foundation-Sec source review rendered native reasoning in a headless Textual session before the final JSON answer, with 598 reasoning updates and 355 answer updates across the review. A separate run completed both installed local specialists. Native thinking support does not guarantee reasoning on every prompt, and the installed VulnLLM artifact does not advertise it.
+
+An explicitly authorized local TypeScript backend audit inspected 123 files with offline scanners, passed 60 existing integration tests, and reproduced six targeted security behaviors using copied source, temporary MongoDB, and simulated storage/email boundaries. Static scanner alerts and model conclusions were triaged separately. One Foundation-Sec prompt missed an ownership defect that the integration test demonstrated; VulnLLM described an incorrect traversal condition. These checks validate the integration and the stated test cases, not broad security accuracy. Customer source, keys, reports and screenshots remain outside this repository.

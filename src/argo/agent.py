@@ -7,7 +7,8 @@ from pathlib import Path
 import httpx
 from jsonschema import Draft202012Validator, ValidationError
 
-from argo.agent_models import ANALYST, CODER, REVIEWER, edit, ready, review, structured
+from argo.agent_findings import FINDING_SCHEMA, merge_findings, tool_findings
+from argo.agent_models import ANALYST, CODER, REVIEWER, edit, local_model_error, ready, review, structured
 from argo.context_budget import ModelLimits, estimate_tokens
 from argo.controller import Cancelled
 from argo.conversation import Conversation, save_checkpoint
@@ -34,6 +35,7 @@ TOOLS = {
     "python.tests": obj(),
     "bandit.scan": obj(),
     "security.review": obj({"model": {"enum": ["foundation", "vulnllm"]}, "paths": PATHS}),
+    "findings.record": obj({"findings": {"type": "array", "minItems": 1, "maxItems": 20, "items": FINDING_SCHEMA}}),
     "finish": obj({"summary": {"type": "string", "minLength": 1, "maxLength": 5000}}),
 }
 SYSTEM = """You are Argo, an agent working in a containerized Python 3.12 workspace.
@@ -43,6 +45,9 @@ The selected project may be mounted read/write. Changes there affect the operato
 You cannot access other host directories, the host shell, provider credentials or arbitrary network.
 Available: workspace.list/read, code.edit (the selected coding model writes complete files), python.run,
 python.tests (runs ALL pytest tests, empty parameters), bandit.scan (empty parameters), security.review (Foundation-Sec or VulnLLM), configured MCP tools.
+Use findings.record for every security concern before finish, with source path, severity, explanation,
+remediation and evidence_ids returned by completed tools. Do not leave findings only in prose.
+Recorded model and script findings remain suspected; passing static assertion scripts cannot confirm exploitability.
 python.run is ONLY for standalone scripts. Never use it on pytest files; always use python.tests for tests.
 Python standard library, pytest and Bandit are installed; third party packages cannot be downloaded.
 Relative workspace paths only. Tool actions cannot change permission, model or MCP configuration.
@@ -127,6 +132,7 @@ def run_agent(
     snapshot = None
     validation_result = None
     compact_events = []
+    findings = []
 
     def check():
         if cancelled() or store.cancelled():
@@ -256,16 +262,36 @@ def run_agent(
                         model = ANALYST if arguments["model"] == "foundation" else REVIEWER
                         progress(name, model)
                         try:
-                            result = {"model": model, **review(model, files, check, on_text=lambda text: progress("security.review", model, text=text, provisional=True))}
+                            result = {"model": model, **review(
+                                model, files, check,
+                                on_text=lambda text: progress("security.review", model, text=text, provisional=True),
+                                on_reasoning=lambda text: progress("security.review", model, reasoning=text),
+                                on_status=lambda text: progress("security.review", model, status=text),
+                            )}
                             progress("security.review", model, text=analysis_text(json.dumps(result)), provisional=False)
                         except (httpx.HTTPError, OSError, RuntimeError, ValueError, ValidationError) as exc:
-                            progress("security.review", model, text="The local specialist is unavailable or returned an incomplete response.", error=True)
-                            raise ValueError("The requested local security specialist is unavailable. Continue source review with the selected coding model and report this gap.") from exc
+                            message = local_model_error(exc)
+                            gaps.append(model + ": " + message)
+                            progress("security.review", model, text=message, error=True)
+                            raise ValueError(message + " Continue source review with the selected coding model and report this gap.") from exc
+                    elif name == "findings.record":
+                        known_evidence = {event["evidence_id"] for event in events}
+                        for item in arguments["findings"]:
+                            if validate_path(item["path"]) not in final_files:
+                                raise ValueError("Finding source must exist in the selected workspace")
+                            if set(item["evidence_ids"]) - known_evidence:
+                                raise ValueError("Finding cites unknown tool evidence")
+                        result = {"findings": arguments["findings"]}
                     elif name.startswith("mcp.") and mcp:
                         result = mcp.call(name.removeprefix("mcp."), arguments)
                     else:
                         raise ValueError("Tool is not available")
                     identity = store.add("agent_tool", {"step": step + 1, "action": action, "result": result})
+                    additional = tool_findings({"action": action, "result": result}, identity)
+                    if additional:
+                        findings = merge_findings(findings, additional)
+                        store.set("finding_count", len(findings))
+                        progress("findings", findings=findings)
                     events.append({"tool": name, "evidence_id": identity, "exit_code": result.get("exit_code"), "model": result.get("model"), "test_hashes": result.get("test_hashes")})
                     text = json.dumps(clean(result))
                     observation = {"action": action, "untrusted_result": text, "evidence_id": identity}
@@ -302,7 +328,7 @@ def run_agent(
             snapshot = export(store, clean(seed), sanitized, max_files=1000 if project else 100)
             report = {
                 "kind": "isolated_agent", "run_id": store.run_id, "engagement_id": "isolated-agent", "status": status,
-                "summary": summary, "findings": [], "coverage_gaps": gaps, "tools": events,
+                "summary": summary, "findings": findings, "coverage_gaps": gaps, "tools": events,
                 "workspace_evidence": snapshot, "code": str(store.path / "code"), "diff": str(store.path / "changes.diff"),
                 "models": {"coordinator": planner, "coder": coder, "security": [ANALYST, REVIEWER]},
                 "coding_profile": coding.model_dump() if coding else None,
@@ -311,13 +337,16 @@ def run_agent(
                 "independent_validation": validation_result,
             }
             write_private(store.path / "report.json", json.dumps(clean(report), indent=2) + "\n")
-            lines = ["# Argo isolated agent", "", "Status: " + status, "", summary, "", "## Tool evidence", ""]
+            lines = ["# Argo isolated agent", "", "Status: " + status, "", summary, "", "## Findings", ""]
+            for item in findings:
+                lines += [f"### {item['title']}", "", f"{item['status']} · {item['severity']} · {item['asset']}", "", item["explanation"], "", "Remediation: " + item["remediation"], "", "Evidence: " + ", ".join(item["evidence_ids"]), ""]
+            lines += ["## Tool evidence", ""]
             lines += [f"- `{event['tool']}`: `{event['evidence_id']}` (exit: {event['exit_code']})" for event in events]
             lines += ["", "## Artifacts", "", "Files were changed directly in the mounted project: " + str(project) if project else "Disposable workspace; original projects were not changed.", "Code snapshot: `code/`. Changes: `changes.diff`.", "", "Security reviews are hypotheses. Test results apply only to the executed tests; generated tests are not independent proof of security.", "", *gaps]
             write_private(store.path / "report.md", "\n".join(lines) + "\n")
             store.set("status", status)
-            store.set("finding_count", 0)
+            store.set("finding_count", len(findings))
             store.manifest()
         finally:
             store.close()
-    return {"run_id": store.run_id, "status": status, "summary": summary, "report": str(store.path / "report.md"), "code": str(project or store.path / "code"), "project": str(project) if project else None, "diff": str(store.path / "changes.diff"), "tool_calls": len(events), "independent_validation": validation_result}
+    return {"run_id": store.run_id, "status": status, "summary": summary, "findings": len(findings), "report": str(store.path / "report.md"), "code": str(project or store.path / "code"), "project": str(project) if project else None, "diff": str(store.path / "changes.diff"), "tool_calls": len(events), "independent_validation": validation_result}

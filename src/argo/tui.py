@@ -2,6 +2,7 @@ import getpass
 import json
 import shlex
 import threading
+import time
 from pathlib import Path
 
 from rich.text import Text
@@ -24,6 +25,7 @@ from textual.widgets import (
 )
 
 from argo.agent import import_sources, restore, run_agent
+from argo.agent_findings import load_agent_findings
 from argo.agent_models import ANALYST, REVIEWER
 from argo.chat import answer, display_text
 from argo.context_budget import ModelLimits
@@ -367,9 +369,11 @@ class ArgoApp(App):
         self.check_services()
         self.check_model_limits(self.coding)
         self.action_prompt()
+        self.set_interval(1, self.refresh_model_wait)
 
     def on_resize(self, event):
         self.set_class(event.size.width < 100, "compact")
+        self.call_after_refresh(self.layout_findings)
 
     def say(self, speaker, content):
         content = display_text(content)
@@ -437,8 +441,8 @@ class ArgoApp(App):
             self.ui("#" + role + "-identity", Static).update(display_text(label.upper() + "  /  " + title + "\n" + model))
             self.ui("#" + role + "-activity", Static).update(display_text(availability + " · " + status))
             output = self.ui("#" + role + "-output", TextArea)
-            output.set_class(not activity.get("text"), "empty-output")
-            text = display_text(activity.get("text", "Called when needed by the task. No response yet."))
+            output.set_class(not (activity.get("text") or activity.get("reasoning")), "empty-output")
+            text = display_text("\n\n".join(filter(None, ["Reasoning\n" + activity["reasoning"] if activity.get("reasoning") else "", activity.get("text")])) or activity.get("waiting") or "Called when needed by the task. No response yet.")
             if output.text != text:
                 output.load_text(text)
         self.ui("#model-summary", Static).update(display_text("\n\n".join(rows)))
@@ -671,6 +675,9 @@ class ArgoApp(App):
 
     def progress(self, data):
         self.current_run = self.state_root / data["run_id"]
+        if "findings" in data and isinstance(data["findings"], list):
+            self.report_data = {"run_id": data["run_id"], "findings": data["findings"]}
+            self.refresh_findings()
         self.set_status(data["stage"].capitalize() + "  ·  " + data.get("model", data["run_id"][:12]))
         if data.get("compact", {}).get("phase") == "complete":
             compact = data["compact"]
@@ -680,9 +687,9 @@ class ArgoApp(App):
                 self.coding_limits = ModelLimits.model_validate(data["limits"])
             if data.get("context"):
                 self.model_activity.setdefault(data["model"], {})["context"] = data["context"]
-            self.model_update(data["model"], data["stage"], data.get("text"), data.get("provisional"), data.get("error", False))
+            self.model_update(data["model"], data["stage"], data.get("text"), data.get("provisional"), data.get("error", False), data.get("reasoning"), data.get("status"))
 
-    def model_update(self, model, stage, text=None, provisional=None, error=False):
+    def model_update(self, model, stage, text=None, provisional=None, error=False, reasoning=None, status=None):
         if self.active_model != model:
             previous = self.model_activity.get(self.active_model, {})
             if previous.get("state") == "Working":
@@ -690,26 +697,50 @@ class ArgoApp(App):
             self.model_messages.pop(model, None)
         self.active_model = model
         activity = self.model_activity.setdefault(model, {})
-        if text is None and stage in {"security.review", "analysis"}:
+        if text is None and reasoning is None and status is None and stage in {"security.review", "analysis"}:
             self.model_messages.pop(model, None)
+            self.model_messages.pop((model, "reasoning"), None)
             activity.pop("text", None)
+            activity.pop("reasoning", None)
+            activity.update(waiting="Loading model", started=time.monotonic())
         activity.update(stage=stage, state="Error" if error else ("Response complete" if provisional is False else "Working"))
+        if status:
+            activity.update(waiting=status, started=time.monotonic())
+        if reasoning:
+            activity["reasoning"] = display_text(reasoning)
+            activity.pop("waiting", None)
+            key = (model, "reasoning")
+            if key not in self.model_messages and model in self.model_messages and not activity.get("text"):
+                self.model_messages[key] = self.model_messages.pop(model)
+            self.render_model_output(key, self.model_label(model) + " · reasoning", activity["reasoning"], "#b4abaa")
         if text:
             activity["text"] = display_text(text)
+            activity.pop("waiting", None)
             label = self.model_label(model)
             suffix = " · provisional analysis" if provisional else (" · analysis incomplete" if error else " · response")
-            widget = self.model_messages.get(model)
-            if widget is None:
-                widget = self.say(label, activity["text"])
-                self.model_messages[model] = widget
-            else:
-                for index in range(len(self.transcript) - 1, -1, -1):
-                    if self.transcript[index][0] == label:
-                        self.transcript[index] = (label, activity["text"])
-                        break
-            widget.update(Text.assemble((label + suffix + "\n", "bold #83cec6"), activity["text"]))
-            self.call_after_refresh(self.ui("#conversation", VerticalScroll).scroll_end, animate=False)
+            self.render_model_output(model, label + suffix, activity["text"])
+        self.refresh_model_wait()
         self.refresh_models()
+
+    def render_model_output(self, key, label, text, color="#83cec6"):
+        widget = self.model_messages.get(key)
+        if widget is None:
+            widget = self.say(label, text)
+            widget.transcript_entry = self.transcript[-1]
+            self.model_messages[key] = widget
+        for index, entry in enumerate(self.transcript):
+            if entry is widget.transcript_entry:
+                widget.transcript_entry = (label, text)
+                self.transcript[index] = widget.transcript_entry
+                break
+        widget.update(Text.assemble((label + "\n", "bold " + color), (text, color if color != "#83cec6" else "")))
+        self.call_after_refresh(self.ui("#conversation", VerticalScroll).scroll_end, animate=False)
+
+    def refresh_model_wait(self):
+        activity = self.model_activity.get(self.active_model, {})
+        if activity.get("state") == "Working" and activity.get("waiting"):
+            elapsed = int(time.monotonic() - activity["started"])
+            self.render_model_output(self.active_model, self.model_label(self.active_model), f"{activity['waiting']} · {elapsed}s")
 
     @work(thread=True, exit_on_error=False)
     def audit(self, command, models, scanners, previous):
@@ -882,6 +913,29 @@ class ArgoApp(App):
                 ],
                 key=item["id"],
             )
+        self.layout_findings()
+
+    def layout_findings(self):
+        if not self.is_running or not self.screen_stack[0].query("#findings"):
+            return
+        table = self.ui("#findings", DataTable)
+        width = table.size.width
+        if width < 50 or len(table.columns) != 4:
+            return
+        location = min(28, width // 3)
+        widths = [10, 8, max(12, width - location - 27), location]
+        changed = False
+        for column, target in zip(table.columns.values(), widths):
+            if column.width != target or column.auto_width:
+                column.width, column.auto_width = target, False
+                changed = True
+        if changed:
+            table.refresh(layout=True)
+
+    @on(TabbedContent.TabActivated)
+    def findings_view_activated(self, event):
+        if event.pane.id == "findings-tab":
+            self.call_after_refresh(self.layout_findings)
 
     @on(DataTable.RowHighlighted, "#findings")
     def finding_selected(self, event):
@@ -893,9 +947,12 @@ class ArgoApp(App):
         if self.selected_finding:
             item = self.selected_finding
             content = (
-                f"{item['title']}\n{item['status'].upper()} · {item['severity']} · {item.get('cwe') or 'No CWE assigned'}\n\n{item['explanation']}\n\nRemediation\n{item['remediation']}\n\nEvidence\n"
+                f"{item['title']}\n{item['asset']}" + (f":{item['line']}" if item.get('line') else "")
+                + f"\n{item['status'].upper()} · {item['severity']} · {item.get('cwe') or 'No CWE assigned'}\n\n{item['explanation']}\n\nRemediation\n{item['remediation']}\n\nEvidence\n"
                 + "\n".join(item["evidence_ids"])
             )
+            if item.get("validation"):
+                content += "\n\nValidation\n" + item["validation"]
             self.ui("#finding-detail", TextArea).load_text(display_text(content))
 
     def refresh_runs(self):
@@ -904,6 +961,9 @@ class ArgoApp(App):
         for path in sorted(self.state_root.glob("*"), key=lambda p: p.name):
             try:
                 state = read_state(run_path(self.state_root, path.name))
+                if not state.get("finding_count") and (path / "report.json").is_file():
+                    report = json.loads((path / "report.json").read_text())
+                    state["finding_count"] = len(load_agent_findings(path, report))
                 table.add_row(
                     *[
                         Text(display_text(str(state.get(key, "—"))))
@@ -923,6 +983,7 @@ class ArgoApp(App):
         try:
             path = run_path(self.state_root, identity)
             report = json.loads((path / "report.json").read_text())
+            report["findings"] = load_agent_findings(path, report)
             if self.current_run != path:
                 self.model_activity = {}
                 self.model_messages = {}
@@ -932,7 +993,8 @@ class ArgoApp(App):
                     analyses.append(read_evidence(path, item["evidence_id"])["data"]["result"])
             for analysis in analyses:
                 if analysis.get("model"):
-                    self.model_activity[analysis["model"]] = {"state": "Saved response", "stage": "Security analysis", "text": analysis_text(json.dumps(analysis))}
+                    activity = self.model_activity.setdefault(analysis["model"], {})
+                    activity.update(state="Saved response", stage="Security analysis", text=analysis_text(json.dumps(analysis)))
             self.refresh_models()
             self.report_data = report
             self.current_run = path

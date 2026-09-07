@@ -21,7 +21,7 @@ SCHEMA = {"type": "object", "properties": {"ok": {"const": True}}, "required": [
 
 
 @contextmanager
-def endpoint(protocol, replies=None, status=200, json_response=False, reasoning_tokens=0, metadata=None, error=None):
+def endpoint(protocol, replies=None, status=200, json_response=False, reasoning_tokens=0, metadata=None, error=None, chunks=None):
     records = []
     iterator = iter(replies) if replies is not None and not callable(replies) else None
 
@@ -39,6 +39,12 @@ def endpoint(protocol, replies=None, status=200, json_response=False, reasoning_
         def do_POST(self):
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             records.append({"method": "POST", "path": self.path, "body": body, "headers": dict(self.headers)})
+            if self.path == "/api/show":
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps(metadata or {"capabilities": ["completion", "thinking"]}).encode())
+                return
             result = replies(body) if callable(replies) else (next(iterator) if iterator is not None else {"ok": True})
             content = json.dumps(result)
             self.send_response(status)
@@ -51,6 +57,11 @@ def endpoint(protocol, replies=None, status=200, json_response=False, reasoning_
                 data = {"content": [{"type": "text", "text": content}], "stop_reason": "end_turn"} if protocol == "anthropic" else {"choices": [{"message": {"content": content}, "finish_reason": "stop"}]}
                 self.wfile.write(json.dumps(data).encode())
             elif protocol == "ollama":
+                if chunks is not None:
+                    for chunk in chunks(body) if callable(chunks) else chunks:
+                        self.wfile.write((json.dumps(chunk) + "\n").encode())
+                        self.wfile.flush()
+                    return
                 midpoint = len(content) // 2
                 for part, done in [(content[:midpoint], False), (content[midpoint:], True)]:
                     self.wfile.write((json.dumps({"message": {"content": part, "thinking": "Private scratchpad"}, "done": done}) + "\n").encode())

@@ -111,7 +111,7 @@ The TUI uses [Textual](https://github.com/Textualize/textual) under MIT.
 | Service readiness | /doctor |
 | Stop active work | Escape or /stop |
 
-Tab completes commands; up/down recall prompts. Ctrl+L focuses input, Ctrl+R opens runs, F1 shows help, and Ctrl+Q stops work before closing. The sidebar hides below 100 columns. All three models remain visible in the header; F3 opens their roles, activity and live responses. Local analysis streams as provisional summaries and suspected findings, then becomes a saved response. Raw model thinking is not displayed.
+Tab completes commands; up/down recall prompts. Ctrl+L focuses input, Ctrl+R opens runs, F1 shows help, and Ctrl+Q stops work before closing. The sidebar hides below 100 columns. All three models remain visible in the header; F3 opens their roles, activity and live responses. Local source reviews stream exposed reasoning separately from provisional analysis. Reasoning remains visible during the current session when the endpoint emits it; only validated final responses are saved as tool evidence. Foundation-Sec advertises native thinking; the installed VulnLLM endpoint currently does not. Findings appear during the run and remain available after reopening it. Older structured script/model observations are recovered from verified evidence and stay suspected.
 
 Resuming a mounted-project report does not change the selected directory. Disposable runs restore verified files into a new disposable workspace. Report contents never grant permission to mount another path, and interrupted side effects are never replayed.
 
