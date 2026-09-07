@@ -94,7 +94,7 @@ The coordinator uses `findings.record` with source path, optional line, title, s
 
 Older agent reports with an empty findings list are reconstructed at read time from content-verified tool records. Supported legacy aliases are `titolo`, `file` and `evidenza`. Free-form final summaries are not parsed into findings, arbitrary evidence citations in tool output are discarded, and invalid paths are ignored. Original reports and manifests are not rewritten. Runs displays the recovered count.
 
-Local source review reserves space for an output increase from 4,096 to 8,192 tokens. A length stop retries only that inference once; errors distinguish truncation, malformed JSON, incomplete streams, HTTP errors, connection failures and timeouts. The 16,384-token local context, 2 MiB stream budget and 300-second per-request deadline remain independent of the selected coding provider context.
+Foundation-Sec and VulnLLM source reviews reserve space for an output increase from 4,096 to 8,192 tokens. A length stop retries only that inference once; errors distinguish truncation, malformed JSON, incomplete streams, HTTP errors, connection failures and timeouts. Their 16,384-token local context, 2 MiB stream budget and 300-second per-request deadline remain independent of the selected coding provider context. Qwen uses the larger local limits below.
 
 
 ## Third reviewer and concurrent reviews
