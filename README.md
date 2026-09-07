@@ -72,7 +72,7 @@ Argo reads the selected model's limits from its API, caches them for five minute
 
 Before each coordination request, Argo estimates token use from UTF-8 text and retains a 10% safety margin plus a response reserve. This is an estimate, not the provider's exact tokenizer count. At 90% of the input budget, auto-compact summarizes older history, retaining the original task, the deterministic completed-tool ledger and recent results. It saves a verified compaction record and context.json before the next action. Failed compaction does not discard history or replay tools. F3 shows the context limit, estimated use and compaction count.
 
-Endpoints that do not publish context limits use an explicitly labelled 16,384-token fallback; set an override in F2 when the endpoint requires it. Local Ollama roles run with a 16,384-token context for memory usage. Large specialist reviews are split into source batches; cross-batch findings still require verification.
+Endpoints that do not publish context limits use an explicitly labelled 16,384-token fallback; set an override in F2 when the endpoint requires it. Foundation-Sec and VulnLLM reviews use 16,384-token contexts; Qwen reviews use 32,768. These local allocations are independent of the coding provider context. Large specialist reviews are split into source batches; cross-batch findings still require verification.
 
 Reports, summaries and evidence persist. A new task currently starts a new conversation over the selected project or restored files; /resume reopens results, including local model responses, and does not replay actions or automatically load old conversation memory.
 
