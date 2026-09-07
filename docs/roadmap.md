@@ -2,7 +2,7 @@
 
 An executable MVP now covers the Textual TUI, core CLI, authorization binding, source audit, isolated Semgrep/Gitleaks, typed provider clients, local cybersecurity model adapters, a scoped HTTP broker, controlled validation, evidence manifests, reports, and retests. The milestone descriptions below remain the full target; they must not be read as a claim that every acceptance criterion has shipped.
 
-The isolated agent now adds a configurable Ollama/OpenAI/Anthropic-compatible coder/coordinator, executable tool loop, a read/write project mount and optional disposable Docker workspace, pytest/Bandit, exported code/diffs, verified workspace continuation, and public Streamable HTTP MCP access. See [isolated-agent.md](isolated-agent.md) for the shipped contracts and boundaries.
+The isolated agent now adds a configurable Ollama/OpenAI/Anthropic-compatible coder/coordinator, executable tool loop, a read/write project mount and optional disposable Docker workspace, pytest/Bandit and targeted Node controls, project-matched OSV/NVD/EPSS/KEV intelligence with persistent Findings and three concurrent applicability reviewers, exported code/diffs, verified workspace continuation, and public Streamable HTTP MCP access. See [isolated-agent.md](isolated-agent.md) for the shipped contracts and boundaries.
 
 Remaining work includes authenticated/stdio MCP, the CVE sidecar, network-enabled Nuclei/ZAP workers, authenticated API role matrices, general network discovery, abrupt-crash recovery hardening, more runtimes/lockfile formats, and the larger held-out model evaluation corpus. The first real engagement still requires an operator-selected target.
 

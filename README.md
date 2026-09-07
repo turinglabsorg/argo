@@ -2,7 +2,7 @@
 
 Review code. Investigate security issues. Apply fixes and verify them.
 
-Argo is a terminal agent with specialist local security models and your choice of local or remote coding endpoint. It edits the project you open and executes Python tests in Docker.
+Argo is a terminal agent with specialist local security models and your choice of local or remote coding endpoint. It edits the project you open and executes Python and targeted Node.js security tests in Docker.
 
 Launch Argo from a project directory: that directory is mounted read/write, and edits immediately change its files. F2 or /model selects any model ID through an Ollama, OpenAI-compatible or Anthropic-compatible endpoint. The selected model coordinates tools and writes code. Optional local Foundation-Sec, VulnLLM and Qwen3.8 27B provide independent reviews, individually or in parallel.
 
@@ -92,7 +92,7 @@ CLI equivalents:
 
 The default is the current directory. --isolated, --import and --continue use disposable workspaces instead. A saved snapshot cannot overwrite a mounted project. Home and filesystem root are rejected as project mounts.
 
-Python changes require passing pytest before completion. Other text files can be edited, with missing runtime verification explicitly recorded. Python 3.12, pytest and Bandit are installed. Network package installation and non-Python runners are not available. See [runtime contracts and limits](docs/isolated-agent.md).
+Python changes require passing pytest before completion. Other text files can be edited, with missing runtime verification explicitly recorded. Python 3.12, pytest, Bandit and Node.js 22 are installed. The `node.tests` tool runs tests/argo-security/*.test.cjs against already available project dependencies. Network package installation is unavailable; targeted controls do not establish full project test coverage. See [runtime contracts and limits](docs/isolated-agent.md).
 
 ## Terminal controls
 
@@ -108,6 +108,7 @@ The TUI uses [Textual](https://github.com/Textualize/textual) under MIT.
 | Reset context while retaining the selected project | /reset |
 | Review changes already made | /diff |
 | See all model roles and live analysis | F3 or /models |
+| Configure CVE intelligence | /cve, /cve connected, /cve offline |
 | Configure remote MCP | /mcp, /mcp off, /mcp PROFILE.json |
 | Discuss findings without execution | /chat QUESTION |
 | Choose the separate advisory chat model | /model foundation or /model vulnllm |
@@ -120,13 +121,23 @@ Tab completes commands; up/down recall prompts. Ctrl+L focuses input, Ctrl+R ope
 
 Resuming a mounted-project report does not change the selected directory. Disposable runs restore verified files into a new disposable workspace. Report contents never grant permission to mount another path, and interrupted side effects are never replayed.
 
+## CVE intelligence
+
+Use `/cve connected` to enable live intelligence, or `/cve offline` to use cached records. The selection persists for subsequent tasks; new installations default to offline. The CLI also accepts `argo agent 'Audit this project' --intelligence connected`.
+
+In connected mode, security tasks inspect project technologies and resolved dependencies before coordination. Argo queries OSV for exact public package versions, uses NVD for known runtime CPE candidates and advisory detail, and adds EPSS/CISA KEV context. Only derived public package/version tuples, CVE IDs and CPEs go to these fixed services. Sources remain in the configured model/workspace flow.
+
+The coordinator can inspect candidates, give up to three at a time to one or all local reviewers, and run bounded Python/Node controls. Findings retain advisory sources, each model's applicability assessment, prerequisites, proposed tests and actual test evidence. A version match or model agreement remains a suspected finding; it is not proof of exploitability.
+
+Supported dependency inputs include npm lockfiles, Yarn v1, uv, Poetry and exact requirements.txt pins. Unsupported formats, private registries/scopes, unpinned runtimes, inconsistent manifests and incomplete queries produce coverage gaps. Lockfile versions are not proof of what is deployed. The on-demand cache has a 24-hour freshness window and exposes stale/missing results; it is not a full local CVE database mirror.
+
 ## External MCP
 
     argo mcp-tools
 
 Public DeepWiki is enabled with a fixed repository-name enum. --no-mcp disables it. Additional public Streamable HTTP MCP servers need an operator-selected endpoint, tool allowlist and argument schemas, through --mcp-profile or /mcp. Calls run in a separate broker container with public DNS/IP checks and no project mount. MCP responses cannot change model, mount or permission settings.
 
-Authenticated/stdio MCP is not implemented. Coding-provider authentication is separate and uses Hush. The [CVE MCP sidecar contract](config/intelligence.contract.json) remains disabled.
+Authenticated/stdio MCP is not implemented. Coding-provider authentication is separate and uses Hush. The [CVE MCP sidecar contract](config/intelligence.contract.json) remains disabled; the native CVE integration above works independently of it.
 
 ## Security labs and legacy audits
 

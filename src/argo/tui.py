@@ -24,6 +24,7 @@ from textual.widgets import (
     TextArea,
 )
 
+from argo.advisories import load_mode, save_mode
 from argo.agent import import_sources, restore, run_agent
 from argo.agent_findings import load_agent_findings
 from argo.agent_models import ANALYST, QWEN, REVIEWER, SPECIALISTS
@@ -41,6 +42,7 @@ from argo.services import CYBER_MODELS, demo, doctor, run_path
 from argo.workspace import project_directory
 
 COMMANDS = [
+    "/cve",
     "/workspace",
     "/isolated",
     "/agent",
@@ -69,6 +71,7 @@ COMMANDS = [
     "/quit",
 ]
 HELP = """Project agent      Type a task, or /agent TASK
+CVE intelligence   /cve connected | offline (no argument: status)
 Coding model       /model or F2 (local / OpenAI / Anthropic)
 All models         /models or F3 (roles, activity and live responses)
 Mounted project    /workspace [PATH]
@@ -274,6 +277,7 @@ class ArgoApp(App):
     def __init__(self, state_root: Path, engagement_path: Path | None = None, *, project=..., settings_path=SETTINGS):
         super().__init__()
         self.state_root = state_root
+        self.intelligence_path = state_root.parent / "intelligence-settings.json"
         self.engagement_path = engagement_path
         self.engagement = None
         self.report_data = None
@@ -547,6 +551,11 @@ class ArgoApp(App):
                 self.action_help()
             elif command == "/models" and not args:
                 self.action_models()
+            elif command == "/cve" and len(args) <= 1:
+                if args:
+                    save_mode(args[0], self.intelligence_path)
+                mode = load_mode(self.intelligence_path)
+                self.say("ARGO", "CVE intelligence: " + mode + (". OSV, NVD, EPSS and KEV; public package versions and CVE/CPE identifiers only." if mode == "connected" else ". Cached records only; missing or stale coverage is reported."))
             elif command == "/model" and not args:
                 self.action_coding_model()
             elif command == "/workspace" and len(args) <= 1:
@@ -811,6 +820,7 @@ class ArgoApp(App):
             options = {
                 "profile": self.agent_profile, "use_mcp": self.agent_mcp,
                 "coding": self.coding.model_copy(deep=True),
+                "intelligence_mode": load_mode(self.intelligence_path),
                 "cancelled": self.cancel_event.is_set,
                 "on_progress": lambda data: self.call_from_thread(self.progress, data),
             }

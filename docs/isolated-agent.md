@@ -40,23 +40,28 @@ The coordinator chooses an action and parameters. The controller validates both 
 | code.edit | Selected coder returns complete contents for explicitly named files |
 | python.run | Fixed Python executable with one workspace script |
 | python.tests | Fixed pytest invocation over the project |
+| node.tests | Fixed Node test runner over 1–40 tests/argo-security/*.test.cjs files |
+| security.inventory | Technologies, resolved packages, manifest hashes and coverage gaps |
+| security.cves | Refresh/reuse inventory-matched advisories; pages of 30 candidates |
+| security.advisory | Known candidate detail with CVE-based NVD/EPSS/KEV enrichment |
+| security.validation | Attach same-run test evidence and an interpretation to a known CVE candidate |
 | bandit.scan | Recursive Bandit scan |
-| security.review | One local reviewer: foundation, vulnllm or qwen |
-| security.review_all | All three reviewers concurrently on the selected paths |
+| security.review | One local reviewer: foundation, vulnllm or qwen; optional 1–3 known candidate IDs |
+| security.review_all | All three reviewers concurrently on the selected paths and advisory context |
 | mcp.TOOL | Remote tool intersected with operator policy |
 | finish | Saves the result and code diff |
 
-Python changes require passing pytest against unchanged file contents. Non-Python text edits can complete with a recorded lack of runtime verification. Python 3.12, standard library, pytest and Bandit are installed. Network installation and non-Python runners are unavailable. Generated tests are not independent security proof.
+Python changes require passing pytest against unchanged file contents. Non-Python text edits can complete with a recorded lack of runtime verification. Python 3.12, standard library, pytest, Bandit and a digest-pinned Node.js 22 binary are installed. Node tests use already available project dependencies; npm and network installation are unavailable. Targeted Node controls do not run the full project suite. Other languages still record missing runtime coverage. Generated tests are not independent security proof.
 
 ## Project mount
 
 Only an operator-selected canonical directory is mounted. Home and filesystem root are rejected. Models cannot choose another host path, Docker flag or image. Worker inspection checks that exactly one writable bind mount maps the selected project to /workspace. Disposable mode has no bind mounts.
 
-Project mode uses the operator UID/GID; disposable mode uses 65532. Both use offline networking, read-only root, dropped capabilities, no-new-privileges, private process namespaces, default seccomp, 768 MiB memory including swap, two CPUs, 64 processes and bounded /tmp. The project intentionally exposes all its contents to generated Python, including hidden files. It is not a boundary between files within the project.
+Project mode uses the operator UID/GID; disposable mode uses 65532. Both use offline networking, read-only root, dropped capabilities, no-new-privileges, private process namespaces, default seccomp, 768 MiB memory including swap, two CPUs, 64 processes and bounded /tmp. The project intentionally exposes all its contents to generated Python or Node code, including hidden files. It is not a boundary between files within the project.
 
 The immutable adapter lives in the pinned worker image outside the mount. Model-facing file operations reject traversal, hidden path components, symlinks and hard links, using directory descriptors and O_NOFOLLOW. Edits compare selected files with pre-generation contents before writing; known concurrent changes produce a conflict. This is a best-effort check, not a filesystem transaction or lock against external editors.
 
-Snapshots skip hidden/dependency/build directories, binary/unreadable files and files above 96 KiB. Limits are 1,000 text files in project mode (100 in disposable mode), 2 MiB aggregate and 6 MiB serialized. Oversized snapshots fail visibly. These adapter bounds do not limit Python to the same files; Python can access the whole selected project.
+Snapshots skip hidden/dependency/build directories, binary/unreadable files and files above 96 KiB. Limits are 1,000 text files in project mode (100 in disposable mode), 2 MiB aggregate and 6 MiB serialized. Oversized snapshots fail visibly. The separate manifests action reads only known manifest/lockfile basenames, with a 2 MiB per-file/aggregate and 100-file limit; this includes lockfiles larger than the source export limit. It preserves descriptor-relative no-follow access and records skipped files. These adapter bounds do not limit executed code to the same files; code can access the whole selected project.
 
 Execution has a 50-second deadline and bounded output. Cancellation removes the container and detached descendants. Already-written project changes remain after cancellation, timeout or test failure. There is no automatic rollback. Abrupt controller failure can leave a container. This is a development container, not a malware-analysis VM.
 
@@ -101,7 +106,7 @@ Foundation-Sec and VulnLLM source reviews reserve space for an output increase f
 
 `security.review` accepts `model: qwen` for the pinned Heretic ARA Q4_K_M artifact (`argo-qwen:27b`). This is an experimental general reasoning model, not a model trained specifically for security. Its source-review allocation is 32,768 context tokens and 8,192 initial output tokens, with one truncation-only retry at 16,384. Temperature is 0.6. Each inference has a 3,600-second deadline, a 600-second idle-read limit and an 8 MiB transport bound to accommodate reasoning deltas. These are local serving allocations, not the model's advertised maximum context or the selected coding provider's limits.
 
-`security.review_all` accepts only `paths` (1–6 existing relative source paths). Three fixed worker threads call the configured reviewers against the same snapshot; they receive no workspace-writing or execution tools. A bounded queue delivers activity and results back to the controller thread. SQLite and evidence writes remain on that thread. Each completed or failed reviewer receives its own `agent_tool` record under `security.review`; the aggregate result includes `reviews`, `execution: concurrent`, and `status: complete|partial`. Each review carries model, status and evidence_id, plus a validated answer or sanitized error. Failures become coverage gaps; successful findings remain suspected. Cancellation retains already recorded responses and stops the remaining requests.
+`security.review_all` accepts `paths` (1–6 existing relative source paths) and optional `candidate_ids` (1–3 known catalog IDs). Three fixed worker threads call the configured reviewers against the same snapshot; they receive no workspace-writing or execution tools. A bounded queue delivers activity and results back to the controller thread. SQLite and evidence writes remain on that thread. Each completed or failed reviewer receives its own `agent_tool` record under `security.review`; the aggregate result includes `reviews`, `execution: concurrent`, and `status: complete|partial`. Each review carries model, status and evidence_id, plus a validated answer or sanitized error. Failures become coverage gaps; successful findings remain suspected. Cancellation retains already recorded responses and stops the remaining requests.
 
 The local HTTP reader polls cancellation during connection, model loading and silent stream periods every 0.2 seconds, and cancels/closes pending asynchronous requests. The synchronous public review API runs this reader in its own worker event loop. Interleaved TUI updates reuse a message per reviewer and never mark another reviewer finished merely because its peer emits a token.
 
@@ -115,3 +120,17 @@ uv run python scripts/evaluate_reviewers.py --model all --output /tmp/argo-paral
 ```
 
 Use a fresh output directory for each evaluation. `--sequential` provides a serial comparison. The harness executes both vulnerable and fixed controls before inference, saves source hashes, elapsed times and separate model answers, and leaves issue interpretation to a reviewer. It does not score substring matches as security accuracy.
+
+## Inventory, advisory context and runtime evidence
+
+`project_inventory.py` parses npm package-lock/shrinkwrap, Yarn v1, uv.lock, poetry.lock and exact requirements.txt pins. It records source manifests/hashes, direct dependency groups, literal import hints and coverage gaps. pnpm/bun are recognized but not parsed; ranges and unsupported sources are not silently resolved. Unknown scoped npm packages and private/custom registries are excluded from external queries. Known Docker runtime images get CPE candidates only with exact versions. Imports, lockfiles and CPE matches do not establish deployment or reachability.
+
+`advisories.py` uses the native OSV/NVD/EPSS/CISA KEV clients, independently of the disabled external MCP sidecar. Settings persist privately in ~/.argo/intelligence-settings.json. Library calls default to offline; TUI/CLI load the saved mode, with `/cve` and `--intelligence` controls. Connected security tasks perform inventory and lookup before the coordinator request; reviews can also trigger lookup. Manifest fingerprints invalidate the run's catalog.
+
+OSV querybatch requests contain at most 100 exact package tuples and follow up to five pages per query; advisory detail is hydrated separately. Limits are 1,500 inventory entries, 100 advisory records and 200 package/advisory candidates, with explicit truncation gaps. Runtime CPE queries use up to 20 NVD records per technology. Candidate pages show 30 entries; complete evidence is saved. EPSS and KEV enrichment is bounded to 100 CVE IDs. Public origins and request paths are controller-defined. No source text, arbitrary model URL, discovered credential or installation script is sent to intelligence providers.
+
+Each private cache entry retains provider, retrieval time, source and response. Fresh entries are reused for 24 hours. Connected refresh failures can use explicitly stale records; offline mode distinguishes cached, stale and absent data. Malformed, withdrawn, mismatched or incomplete records cannot become a clean negative result. EPSS/KEV are prioritization signals, not project-specific exploitability proof.
+
+Reviews receive up to three known candidate IDs, package/version/source metadata and bounded advisory text inside their existing context budgets. Their schema requires an applicability assessment for every supplied candidate: potentially_applicable, not_applicable or insufficient_context, with reasoning, prerequisites and a local positive/negative test plan. Advisory text is untrusted evidence. Each completed reviewer persists independently and updates its Finding; failed or unreviewed candidates remain coverage gaps.
+
+`security.validation` accepts one known candidate, 1–5 same-run Python/Node test evidence IDs, an interpretation (reproduced, not_reproduced or blocked), and an explanation. Test records must contain actual test hashes; non-blocked interpretations require a passing control run. This records the model's interpretation of observed execution and does not promote the Finding to confirmed. Reports include intelligence inventory/catalog and typed per-model applicability assessments. Subsequent catalog views preserve previous reviews and runtime evidence.

@@ -188,3 +188,13 @@ Actual Argo run **f92408b3acee4d15a322eb3ae839c197** used the operator's Muse Sp
 The three response intervals overlapped for **28.43 seconds**. Native Ollama reported all three models fully GPU-offloaded, with **32.44 GB aggregate model GPU allocation**: Qwen 19.22 GB, Foundation-Sec 7.30 GB and VulnLLM 5.91 GB. System swap usage remained at its pre-existing **171.62 MB** throughout the sampled run. Completed models were subsequently unloaded by Ollama's idle timer.
 
 The full coordinated run took **1,016.14 seconds** (about 17 minutes); Qwen produced **3,310 reasoning updates**, more than its initial standalone trial. This validates concurrent operation and memory fit under the measured configuration, not a speedup. Output lengths and stochastic reasoning differ between trials, and TUI/coordination time is included. Live captures and detailed measurements remain in the operator's private evaluation directory.
+
+## Project CVE intelligence and Node controls — September 7
+
+The final full suite passed 168 tests. Ruff, structural design validation and source/wheel builds passed.
+
+The new integration exercises real local HTTP fixtures for OSV pagination/detail, NVD/EPSS/KEV enrichment, freshness/cache reuse, malformed data, private package exclusion, all three reviewer request payloads, coordinator tool selection, test evidence and persisted Findings. Fixtures return controlled model/advisory responses; they are not paid inference or an accuracy evaluation. TUI checks persist /cve mode at 80 columns. Docker checks execute passing/failing Node controls, deny root writes and Docker socket access, and read large lockfiles through bounded manifest access.
+
+A separate live read-only inventory of an authorized private Node project resolved 615 entries and queried 609 public package versions. OSV returned 125 package/advisory candidates; EPSS and KEV were retrieved from their actual services. Those counts are candidates, not proven vulnerabilities. Coverage includes non-exact runtime tags, excluded private/custom scopes and manifest/lock consistency limitations. Private source, responses and customer evaluation artifacts remain outside the repository.
+
+The Node-enabled worker was rebuilt and executed successfully; the installed image digest is sha256:e8a1ffcf6d500cf2d955b1f6e908edafe0592ccc8527b703d1f19786ff1afa0f. It preserves the offline workspace boundary. Runtime exploit validation and model quality remain separate from a successful advisory lookup.

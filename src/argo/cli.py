@@ -5,6 +5,7 @@ import re
 import sys
 from pathlib import Path
 
+from argo.advisories import load_mode
 from argo.agent import import_sources, restore, run_agent
 from argo.agent_models import MODELS
 from argo.contracts import Actions, Engagement, Scope
@@ -35,6 +36,7 @@ def main():
     inputs.add_argument("--project", type=Path, help="Mount this directory read/write (default: current directory)")
     inputs.add_argument("--isolated", action="store_true", help="Use a disposable workspace without a project mount")
     sub.add_argument("--no-mcp", action="store_true")
+    sub.add_argument("--intelligence", choices=["offline", "connected"], help="Override saved CVE intelligence mode for this task")
     sub.add_argument("--mcp-profile", type=Path)
     sub.add_argument("--max-steps", type=int, default=24)
     sub.add_argument("--planner", choices=MODELS, help="Explicit local coordinator override; otherwise use the TUI-selected coding profile")
@@ -87,6 +89,7 @@ def main():
                 "use_mcp": not args.no_mcp,
                 "profile": load_profile(args.mcp_profile) if args.mcp_profile else None,
                 "max_steps": args.max_steps,
+                "intelligence_mode": args.intelligence or load_mode(args.state_dir.parent / "intelligence-settings.json"),
                 "on_progress": lambda event: print(json.dumps(event), file=sys.stderr, flush=True),
             }
             if args.planner:

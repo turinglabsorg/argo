@@ -50,6 +50,16 @@ def tool_findings(data, evidence_id):
         return []
     if tool == "security.review":
         values = result.get("suspected_findings", [])
+    elif tool == "security.cves":
+        return [Finding(
+            id=item["id"], asset=validate_path(item["package"]["path"]), rule="agent.cve",
+            title=f"{', '.join(item['cve_ids']) or item['advisory_id']}: {item['package']['name']}@{item['package']['version']}"[:200],
+            severity=item["severity"], status="suspected", evidence_ids=[evidence_id],
+            explanation=(item["match"] + ". " + item["summary"] + "\n" + item["details"])[:3000],
+            remediation="Review applicability and the upstream advisory. Reported fixed versions: " + (", ".join(item["fixed_versions"]) or "consult the advisory") + ". Verify compatibility and rerun regression tests.",
+            validation="CVE candidate; runtime reachability and exploitability are unverified. Source freshness: " + item["freshness"],
+            advisory_ids=list(dict.fromkeys([item["advisory_id"], *item["cve_ids"]])),
+        ).model_dump() for item in result.get("candidates", [])]
     elif tool == "findings.record":
         values = result.get("findings", [])
     elif tool == "python.run" and result.get("exit_code") == 0:
@@ -79,9 +89,31 @@ def merge_findings(existing, additional):
     merged = {item["id"]: item for item in existing}
     for item in additional:
         if item["id"] in merged:
-            item = {**item, "evidence_ids": list(dict.fromkeys([*merged[item["id"]]["evidence_ids"], *item["evidence_ids"]]))}
+            item = {**item, "evidence_ids": list(dict.fromkeys([*merged[item["id"]]["evidence_ids"], *item["evidence_ids"]])), "assessments": merged[item["id"]].get("assessments", []) + item.get("assessments", [])}
+            if item["rule"] == "agent.cve":
+                item["validation"] = merged[item["id"]]["validation"]
         merged[item["id"]] = item
     return list(merged.values())
+
+
+def apply_cve_reviews(findings, result, evidence_id):
+    indexed = {item["id"]: item for item in findings}
+    for assessment in result.get("cve_assessments", []):
+        if assessment["candidate_id"] not in indexed:
+            continue
+        item = indexed[assessment["candidate_id"]]
+        value = {key: assessment[key] for key in ("assessment", "reason", "prerequisites", "test_plan")}
+        value.update(model=result["model"], evidence_id=evidence_id)
+        item.setdefault("assessments", []).append(value)
+        item["evidence_ids"] = list(dict.fromkeys([*item["evidence_ids"], evidence_id]))
+        previous_runtime = item.get("validation", "").partition("\n\nRuntime evidence attached.")
+        item["validation"] = "Model applicability assessments; exploitability remains unverified.\n" + "\n\n".join(
+            f"{review['model']}: {review['assessment']}\n{review['reason']}\nPrerequisites: {review['prerequisites']}\nLocal test: {review['test_plan']}"
+            for review in item["assessments"]
+        )
+        if previous_runtime[1]:
+            item["validation"] += previous_runtime[1] + previous_runtime[2]
+    return list(indexed.values())
 
 
 def load_agent_findings(path, report):
@@ -89,10 +121,12 @@ def load_agent_findings(path, report):
         return report.get("findings", [])
     findings = []
     for event in report.get("tools", []):
-        if event.get("tool") not in {"security.review", "findings.record", "python.run"}:
+        if event.get("tool") not in {"security.review", "security.cves", "findings.record", "python.run"}:
             continue
         identity = event["evidence_id"]
         record = read_evidence(path, identity)
         if record.get("kind") == "agent_tool":
             findings = merge_findings(findings, tool_findings(record["data"], identity))
+            if event.get("tool") == "security.review":
+                findings = apply_cve_reviews(findings, record["data"]["result"], identity)
     return findings

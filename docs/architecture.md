@@ -1,6 +1,6 @@
 # Architecture
 
-Status: implemented isolated code agent plus a broader target architecture. The current capability boundary is documented in README.md and [isolated-agent.md](isolated-agent.md). Textual and CLI now run a schema-validated model/tool loop, a selectable local/remote coder, a read/write project mount, offline code execution, pytest, Bandit, and restricted external MCP. Native scoped HTTP checks and the deterministic engagement audit remain available separately. Network-enabled third-party scanners and the external CVE MCP sidecar remain deferred.
+Status: implemented isolated code agent plus a broader target architecture. The current capability boundary is documented in README.md and [isolated-agent.md](isolated-agent.md). Textual and CLI now run a schema-validated model/tool loop, a selectable local/remote coder, a read/write project mount, offline Python/Node execution, pytest, Bandit, native project-matched CVE intelligence, three local reviewers and restricted external MCP. Native scoped HTTP checks and the deterministic engagement audit remain available separately. Network-enabled third-party scanners and the external CVE MCP sidecar remain deferred.
 
 The sections below describe the broader engagement architecture. Its network gateways, full finding-confirmation loop and scanner inventory must not be confused with the implemented offline code agent. The exact shipped boundary, tool names, resource limits, artifact format and continuation behavior are specified in [isolated-agent.md](isolated-agent.md).
 
@@ -34,11 +34,11 @@ flowchart TD
 
 The controller runs natively and calls Ollama on loopback. Scanner workers cannot contact Ollama, the controller, the Docker API, or arbitrary host services. The controller alone creates workers through the local Docker API. Model processes receive normalized evidence and emit typed proposals; they do not receive a shell or worker-management credentials.
 
-Start with one controller and sequential model stages. Multiple specialist roles do not require independent concurrent agents. Use bounded concurrency only for independent scanner or intelligence work.
+The shipped controller can dispatch three read-only specialist reviews concurrently over one source snapshot and advisory context. Controller-side state/evidence writes stay serialized. The diagram describes the broader target architecture; current CVE queries use native fixed-origin clients, without the proposed MCP sidecar.
 
 ## Agent loop
 
-The legacy engagement audit runs deterministic stages and collects `explain`/`review_evidence` proposals. The default isolated agent separately executes validated workspace, coder, Python, pytest, Bandit, security-review and MCP actions. Its saved files can seed a new container; interrupted actions are never replayed automatically. The expanded engagement proposal cycle below remains the target for broader network auditing.
+The legacy engagement audit runs deterministic stages and collects `explain`/`review_evidence` proposals. The default isolated agent separately executes validated workspace, coder, Python/Node, pytest, Bandit, inventory/CVE lookup, security-review, runtime-evidence and MCP actions. Its saved files can seed a new container; interrupted actions are never replayed automatically. The expanded engagement proposal cycle below remains the target for broader network auditing.
 
 `draft → authorized → inventory → hypotheses → validation → report → complete`
 
@@ -109,9 +109,9 @@ Business-logic/API testing needs more than scanners: operator-provided API schem
 
 ## Local inference
 
-Use native Ollama for Apple Metal acceleration. Keep the initial model context at 8K tokens, load one model at a time, and measure memory pressure and latency on this machine. Larger context is an evaluated configuration change, not an assumed benefit.
+Use native Ollama for Apple Metal acceleration. Foundation-Sec and VulnLLM use 16,384-token contexts; the experimental Qwen reviewer uses 32,768. Concurrent operation was measured on the 64 GiB Mac; other hosts may queue requests. These local budgets are independent of API-discovered coding-provider limits.
 
-Foundation-Sec-8B-Reasoning is the default analyst and VulnLLM-R-7B is the source-review specialist. Both have pinned Q4_K_M artifacts and have completed a local smoke audit. There is no general-model fallback. Additional models and comparative evaluation remain separate experiments.
+Foundation-Sec-8B-Reasoning is the default analyst and VulnLLM-R-7B is the source-review specialist. They and the experimental Qwen3.8 27B reviewer have pinned Q4_K_M artifacts. No silent provider substitution occurs. Integration smoke checks do not establish broad security accuracy.
 
 Do not assume Hugging Face weights are directly runnable in Ollama. Pin source revisions, file hashes, quantization, templates, license references, context settings, and conversion provenance. The selected artifacts are in `config/models.lock.json`; actual smoke results are in `docs/validation.md`. Legacy audit proposals still use schema-constrained chat with thinking disabled, and advisory chat retains its separate transport. Agent source reviews discover Ollama thinking capabilities and stream API-exposed reasoning to the TUI when emitted. Reasoning is transient and separate from validated final answers. Structured findings are persisted in reports and recovered from verified older tool evidence. These smoke tests do not establish benchmark accuracy or reliable instruction following for every prompt.
 
@@ -119,7 +119,7 @@ Retrieved code, HTML, scanner output, and MCP responses are untrusted data. Keep
 
 ## Intelligence integration
 
-Use the inspected upstream revision in `config/intelligence.contract.json` as a review baseline. The sidecar is not installed yet. The integration must validate its actual MCP tool list and schemas, because the inspected README and Python signatures disagree.
+Use the inspected upstream revision in `config/intelligence.contract.json` as a review baseline. The sidecar is not installed yet. The current isolated agent already uses native OSV/NVD/EPSS/KEV clients through advisories.py; this sidecar design is a separate future transport. The integration must validate its actual MCP tool list and schemas, because the inspected README and Python signatures disagree.
 
 Start with `lookup_cve`, `get_epss_score`, and `check_kev`. Add `triage_cve` only with the adapter fixing `depth="quick"` and after its transitive provider calls are mapped. Preserve structured source records through dedicated adapters where text output cannot represent missing-data status reliably.
 

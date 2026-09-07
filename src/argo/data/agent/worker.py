@@ -15,6 +15,7 @@ MAX_FILE = 96 * 1024
 MAX_TOTAL = 2 * 1024 * 1024
 MAX_FILES = 1000 if os.environ.get("ARGO_PROJECT_MOUNT") == "1" else 100
 EXCLUDED = {"__pycache__", "node_modules", "vendor", "dist", "build", "target", "venv"}
+MANIFESTS = {"package.json", "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml", "bun.lock", "requirements.txt", "pyproject.toml", "uv.lock", "poetry.lock", "Dockerfile", "docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"}
 
 
 def parts(name):
@@ -49,16 +50,16 @@ def parent(name, create=False):
         raise
 
 
-def read_file(name):
+def read_file(name, limit=MAX_FILE):
     directory, leaf = parent(name)
     try:
         descriptor = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
         with os.fdopen(descriptor, "rb") as source:
             info = os.fstat(source.fileno())
-            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > MAX_FILE:
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > limit:
                 raise ValueError("Only bounded regular files can be read")
-            data = source.read(MAX_FILE + 1)
-            if len(data) > MAX_FILE:
+            data = source.read(limit + 1)
+            if len(data) > limit:
                 raise ValueError("File grew past its limit")
             return data.decode("utf-8")
     finally:
@@ -122,6 +123,25 @@ def execute(argv):
             process.wait(timeout=3)
 
 
+def manifests():
+    result, gaps, size = {}, [], 0
+    for directory, folders, names in os.walk(ROOT, followlinks=False):
+        folders[:] = sorted(p for p in folders if not p.startswith(".") and p not in EXCLUDED)
+        for name in sorted(set(names) & MANIFESTS):
+            path = os.path.relpath(os.path.join(directory, name), ROOT)
+            try:
+                content = read_file(path, 2 * 1024**2)
+            except (ValueError, OSError, UnicodeError):
+                gaps.append(path + ": manifest is unreadable, oversized or not a regular file")
+                continue
+            if len(result) >= 100 or size + len(content.encode()) > 2 * 1024**2:
+                gaps.append("Manifest inventory budget exceeded")
+                return {"files": result, "coverage_gaps": gaps}
+            size += len(content.encode())
+            result[path] = content
+    return {"files": result, "coverage_gaps": gaps}
+
+
 def dispatch(request):
     action = request["action"]
     if action == "list":
@@ -130,6 +150,8 @@ def dispatch(request):
         return {"files": files()}
     if action == "read":
         return {"path": request["path"], "content": read_file(request["path"])}
+    if action == "manifests":
+        return manifests()
     if action == "write":
         values = request["files"]
         if not isinstance(values, dict) or len(values) > 20 or sum(len(v.encode()) for v in values.values()) > MAX_TOTAL:
@@ -152,6 +174,11 @@ def dispatch(request):
         return execute([sys.executable, "-B", ROOT + "/" + request["path"]])
     if action == "tests":
         return execute([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"])
+    if action == "node_tests":
+        selected = sorted(name for name in files() if name.startswith("tests/argo-security/") and name.endswith(".test.cjs"))
+        if not selected or len(selected) > 40:
+            raise ValueError("Create 1–40 Node tests at tests/argo-security/NAME.test.cjs using node:test and node:assert/strict")
+        return execute(["node", "--test", "--test-reporter=tap", *[ROOT + "/" + name for name in selected]])
     if action == "bandit":
         return execute([sys.executable, "-m", "bandit", "-r", ROOT, "-f", "json", "-x", "/workspace/tests", "-q"])
     raise ValueError("Unknown workspace action")

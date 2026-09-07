@@ -73,6 +73,15 @@ class Engagement(Contract):
     credential_refs: list[CredentialRef] = []
 
 
+class ApplicabilityReview(Contract):
+    model: str
+    assessment: Literal["potentially_applicable", "not_applicable", "insufficient_context"]
+    reason: str
+    prerequisites: str
+    test_plan: str
+    evidence_id: str
+
+
 class Finding(Contract):
     id: str
     asset: str
@@ -87,6 +96,8 @@ class Finding(Contract):
     explanation: str
     remediation: str
     validation: str | None = None
+    advisory_ids: list[str] = []
+    assessments: list[ApplicabilityReview] = []
 
 
 class Package(Contract):
