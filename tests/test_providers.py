@@ -8,7 +8,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
-from textual.widgets import Button, Input, Select
+from textual.widgets import Button, Collapsible, Input, Select
 
 from argo.agent import run_agent
 from argo.evidence import verify
@@ -275,3 +275,47 @@ async def test_tui_model_selection_persists_and_edits_launch_directory(tmp_path,
             assert len([row for row in records if row["method"] == "POST"]) == 4
     reopened = ArgoApp(tmp_path / "runs", project=project, settings_path=settings)
     assert reopened.coding.protocol == protocol
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('size', [(80, 24), (140, 44)])
+async def test_settings_advanced_preserves_profile_and_discovery(tmp_path, monkeypatch, size):
+    settings = tmp_path / 'models.json'
+    monkeypatch.setattr('argo.tui.doctor', lambda: {'ollama': {'status': 'unavailable', 'local_models': []}})
+    with endpoint('openai') as (profile, _):
+        profile = profile.model_copy(update={'token_parameter': 'max_completion_tokens', 'output_mode': 'json_schema', 'context_window': 128000, 'max_tokens': 12000})
+        save_profile(profile, settings)
+        app = ArgoApp(tmp_path / 'runs', project=None, settings_path=settings)
+        async with app.run_test(size=size) as pilot:
+            await pilot.press('f2')
+            await pilot.pause()
+            dialog = app.screen
+            advanced = dialog.query_one('#coding-advanced', Collapsible)
+            assert advanced.collapsed
+            assert not dialog.query_one('#coding-discovered', Select).display
+            assert dialog.profile() == profile
+            dialog.query_one('#coding-list', Button).press()
+            for _ in range(50):
+                await pilot.pause(0.05)
+                if not dialog.query_one('#coding-list', Button).disabled:
+                    break
+            assert dialog.query_one('#coding-discovered', Select).display
+            dialog.query_one('#coding-protocol', Select).value = 'anthropic'
+            await pilot.pause()
+            assert not dialog.query_one('#coding-openai').display
+            assert not dialog.query_one('#coding-discovered', Select).display
+            dialog.query_one('#coding-protocol', Select).value = 'openai'
+            await pilot.pause()
+            advanced.scroll_visible(animate=False)
+            await pilot.pause()
+            await pilot.click('#coding-advanced > CollapsibleTitle')
+            assert not advanced.collapsed
+            assert dialog.query_one('#coding-openai').display
+            dialog.query_one('#coding-context', Input).value = '256000'
+            dialog.query_one('#coding-save', Button).press()
+            await pilot.pause()
+            saved = load_settings(settings).coding
+            assert saved.context_window == 256000
+            assert saved.max_tokens == 12000
+            assert saved.token_parameter == 'max_completion_tokens'
+            assert saved.output_mode == 'json_schema'

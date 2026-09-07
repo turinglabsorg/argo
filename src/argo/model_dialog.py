@@ -1,7 +1,7 @@
 from textual import on, work
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import Button, Input, Label, Select, Static
+from textual.widgets import Button, Collapsible, Input, Label, Select, Static
 
 from argo.providers import CodingProfile, generate, list_models, load_settings, model_limits, save_profile
 
@@ -20,32 +20,45 @@ class ModelDialog(ModalScreen):
         with Vertical(id="model-dialog"):
             yield Label("CODING MODEL", classes="dialog-title")
             with VerticalScroll(id="model-fields"):
-                yield Static("This model coordinates tools and edits code. Remote endpoints receive selected source and task context.", classes="muted")
-                yield Label("Saved profile")
-                yield Select([(p.name, p.name) for p in self.settings.profiles] + [("+ New profile", "__new__")], value=profile.name, allow_blank=False, id="coding-profile")
-                yield Label("Profile name")
-                yield Input(profile.name, id="coding-name")
-                yield Label("API protocol")
-                yield Select([("Ollama", "ollama"), ("OpenAI-compatible", "openai"), ("Anthropic-compatible", "anthropic")], value=profile.protocol, allow_blank=False, id="coding-protocol")
-                yield Label("Base URL — local or remote")
-                yield Input(profile.base_url, id="coding-url", placeholder="http://localhost:1234/v1 or https://your-provider/v1")
-                yield Label("Hush credential name — optional, never paste an API key")
-                yield Input(profile.credential, id="coding-credential", placeholder="e.g. argo-cloud; empty for no authentication")
-                yield Label("Model ID — any ID exposed by your endpoint")
-                yield Input(profile.model, id="coding-model")
-                yield Select([], prompt="Discover models or enter an ID above", id="coding-discovered")
-                yield Label("OpenAI JSON output")
-                yield Select([("Prompt only — broad compatibility", "prompt"), ("JSON object", "json_object"), ("JSON schema", "json_schema")], value=profile.output_mode, allow_blank=False, id="coding-output")
-                yield Label("OpenAI token parameter")
-                yield Select([("max_tokens", "max_tokens"), ("max_completion_tokens", "max_completion_tokens")], value=profile.token_parameter, allow_blank=False, id="coding-token-param")
-                yield Label("Context tokens — blank uses model API")
-                yield Input(str(profile.context_window or ""), id="coding-context", placeholder="Automatic")
-                yield Label("Output token cap — blank uses available model context")
-                yield Input(str(profile.max_tokens or ""), id="coding-max-tokens", placeholder="Automatic")
-                yield Static("Credentials are read through Hush. Save a key in Bitwarden, import it with hush pull --name NAME, then enter only NAME here.", classes="muted")
-            yield Static("Choose an endpoint and model, then save.", id="coding-result", markup=False)
+                with Vertical(classes="model-field"):
+                    yield Label("Profile")
+                    yield Select([(p.name, p.name) for p in self.settings.profiles] + [("+ New profile", "__new__")], value=profile.name, allow_blank=False, id="coding-profile")
+                with Vertical(classes="model-field"):
+                    yield Label("Connection")
+                    yield Select([("Ollama · local", "ollama"), ("OpenAI compatible", "openai"), ("Anthropic compatible", "anthropic")], value=profile.protocol, allow_blank=False, id="coding-protocol")
+                with Vertical(classes="model-field"):
+                    yield Label("Endpoint")
+                    yield Input(profile.base_url, id="coding-url", placeholder="https://your-provider/v1")
+                with Vertical(classes="model-field"):
+                    yield Label("Model")
+                    yield Input(profile.model, id="coding-model")
+                    discovered = Select([], prompt="Select a model", id="coding-discovered")
+                    discovered.display = False
+                    yield discovered
+                with Vertical(classes="model-field"):
+                    yield Label("Credential name")
+                    yield Input(profile.credential, id="coding-credential", placeholder="Optional · Hush name")
+                with Collapsible(title="Advanced", id="coding-advanced"):
+                    with Vertical(classes="model-field"):
+                        yield Label("Profile name")
+                        yield Input(profile.name, id="coding-name")
+                    with Vertical(id="coding-openai") as compatibility:
+                        compatibility.display = profile.protocol == "openai"
+                        with Vertical(classes="model-field"):
+                            yield Label("Response format")
+                            yield Select([("Automatic", "prompt"), ("JSON object", "json_object"), ("JSON schema", "json_schema")], value=profile.output_mode, allow_blank=False, id="coding-output")
+                        with Vertical(classes="model-field"):
+                            yield Label("Output token field")
+                            yield Select([("max_tokens", "max_tokens"), ("max_completion_tokens", "max_completion_tokens")], value=profile.token_parameter, allow_blank=False, id="coding-token-param", tooltip="API field used to send the output limit.")
+                    with Vertical(classes="model-field"):
+                        yield Label("Context limit · tokens")
+                        yield Input(str(profile.context_window or ""), id="coding-context", placeholder="Automatic")
+                    with Vertical(classes="model-field"):
+                        yield Label("Output limit · tokens")
+                        yield Input(str(profile.max_tokens or ""), id="coding-max-tokens", placeholder="Automatic")
+            yield Static("", id="coding-result", markup=False)
             with Horizontal(classes="dialog-actions"):
-                yield Button("Models", id="coding-list")
+                yield Button("Find models", id="coding-list")
                 yield Button("Test", id="coding-test")
                 yield Button("Save", id="coding-save", variant="primary")
                 yield Button("Cancel", id="coding-cancel")
@@ -72,14 +85,30 @@ class ModelDialog(ModalScreen):
             for field, value in [("protocol", profile.protocol), ("output", profile.output_mode), ("token-param", profile.token_parameter)]:
                 self.query_one("#coding-" + field, Select).value = value
         self.loading_profile = False
+        self.query_one("#coding-openai").display = profile.protocol == "openai"
+        self.clear_discovery()
+        if event.value == "__new__":
+            self.query_one("#coding-advanced", Collapsible).collapsed = False
+            self.query_one("#coding-name", Input).focus()
 
     @on(Select.Changed, "#coding-protocol")
     def protocol_changed(self, event):
         if self.loading_profile or event.value == Select.BLANK:
             return
+        self.query_one("#coding-openai").display = event.value == "openai"
+        self.clear_discovery()
         field = self.query_one("#coding-url", Input)
         if field.value in PRESETS.values():
             field.value = PRESETS[event.value]
+
+    def clear_discovery(self):
+        field = self.query_one("#coding-discovered", Select)
+        field.display = False
+        field.set_options([])
+
+    @on(Input.Changed, "#coding-url")
+    def endpoint_changed(self):
+        self.clear_discovery()
 
     @on(Select.Changed, "#coding-discovered")
     def model_selected(self, event):
@@ -98,7 +127,7 @@ class ModelDialog(ModalScreen):
                 save_profile(profile, self.settings_path)
                 self.dismiss(profile)
             elif identity in {"coding-list", "coding-test"}:
-                self.query_one("#coding-result", Static).update("Contacting selected endpoint…")
+                self.query_one("#coding-result", Static).update("Connecting…")
                 for name in ("coding-list", "coding-test", "coding-save"):
                     self.query_one("#" + name, Button).disabled = True
                 self.probe(profile, identity == "coding-list")
@@ -121,9 +150,14 @@ class ModelDialog(ModalScreen):
         for name in ("coding-list", "coding-test", "coding-save"):
             self.query_one("#" + name, Button).disabled = False
         if error:
-            self.query_one("#coding-result", Static).update(error + ". You can still enter a model ID manually.")
+            self.query_one("#coding-result", Static).update(error)
         elif discover:
-            self.query_one("#coding-discovered", Select).set_options([(name, name) for name in result])
-            self.query_one("#coding-result", Static).update(f"{len(result)} models found. Select one above or enter its ID.")
+            field = self.query_one("#coding-discovered", Select)
+            field.set_options([(name, name) for name in result])
+            field.display = bool(result)
+            if result:
+                field.focus()
+            self.query_one("#coding-result", Static).update(f"{len(result)} models found.")
         else:
-            self.query_one("#coding-result", Static).update(f"Connected. Context: {limits.context_window:,} tokens. Output: {limits.max_output_tokens or 'not advertised'}. {limits.source}.")
+            suffix = " (fallback)" if limits.source.startswith("Fallback") else ""
+            self.query_one("#coding-result", Static).update(f"Connected. Context: {limits.context_window:,} tokens{suffix}.")

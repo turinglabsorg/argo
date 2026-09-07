@@ -83,10 +83,17 @@ ModalScreen { align: center middle; background: #201d1d 80%; }
 .dialog-actions Button { margin-right: 2; }
 .muted { color: #b4abaa; height: auto; }
 #form-error { color: #f28e85; height: auto; }
-#model-dialog { width: 88; max-width: 96%; height: 94%; background: #292525; border: solid #83cec6; padding: 1 2; }
-#model-fields { height: 1fr; }
-#model-fields Label { margin-top: 0; color: #b4abaa; }
-#coding-result { height: auto; max-height: 3; margin-top: 1; color: #83cec6; }
+#model-dialog { width: 96; max-width: 94%; height: 94%; background: #292525; border: solid #83cec6; padding: 1 4; }
+.compact #model-dialog { padding: 1 2; }
+#model-fields { height: 1fr; padding-right: 1; }
+#model-fields Label { color: #b4abaa; }
+#model-fields .model-field { height: auto; margin-bottom: 1; }
+#coding-openai { height: auto; }
+#coding-advanced { height: auto; background: transparent; border: none; padding: 1 0 0 0; }
+#coding-advanced:focus-within { background-tint: transparent; }
+#coding-advanced > Contents { padding-top: 1; }
+#coding-discovered { margin-top: 1; }
+#coding-result { height: auto; max-height: 3; color: #83cec6; }
 #model-dialog .dialog-actions Button { min-width: 10; width: 1fr; margin-right: 1; }
 
 #model-roster { height: auto; max-height: 2; padding: 0 2; color: #b4abaa; }

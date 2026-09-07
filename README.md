@@ -43,12 +43,12 @@ See [model provenance](config/models.lock.json). The legacy audit/chat commands 
 
 ## Choose your coding model
 
-Run argo, press **F2** or enter **/model**, then select or create a profile:
+Run argo, press **F2** or enter **/model**, then select or create a profile. The main form contains only the connection essentials; **Advanced** contains profile naming, response format and token overrides:
 
 1. Choose Ollama, OpenAI-compatible or Anthropic-compatible.
 2. Enter your base URL and model ID.
 3. Optionally select a Hush credential by name.
-4. Use Models to discover IDs, or enter one manually.
+4. Use Find models to discover IDs, or enter one manually.
 5. Test checks structured output without sending project source. Save applies the profile to subsequent coding and coordination calls.
 
 Profiles persist in ~/.argo/models.json and are also used by the CLI. Saving does not change the selected project.
