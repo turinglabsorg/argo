@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import subprocess
 import uuid
@@ -23,8 +24,8 @@ def validate_path(name):
     return name
 
 
-def validate_files(files):
-    if not isinstance(files, dict) or len(files) > 100:
+def validate_files(files, max_files=100):
+    if not isinstance(files, dict) or len(files) > max_files:
         raise ValueError("Workspace file count exceeded")
     for name, content in files.items():
         validate_path(name)
@@ -46,14 +47,25 @@ def worker_image():
     return value
 
 
-def options(name, image, network="none"):
+def project_directory(path):
+    selected = Path(path).expanduser().resolve(strict=True)
+    if not selected.is_dir() or selected in {Path("/"), Path.home().resolve()}:
+        raise ValueError("Choose a project directory with /workspace PATH; home and filesystem root cannot be mounted")
+    if "," in str(selected) or any(ord(c) < 32 for c in str(selected)):
+        raise ValueError("Docker mount paths cannot contain commas or control characters")
+    return selected
+
+
+def options(name, image, network="none", project=None):
+    uid = f"{os.getuid() or 65532}:{os.getgid() or 65532}" if project else "65532:65532"
+    workspace = ["--mount", f"type=bind,src={project},dst=/workspace", "--env", "ARGO_PROJECT_MOUNT=1"] if project else ["--tmpfs", "/workspace:rw,nosuid,nodev,size=256m,uid=65532,gid=65532,mode=700"]
     return [
         "docker", "run", "--pull", "never", "--name", name, "--network", network,
-        "--read-only", "--user", "65532:65532", "--cap-drop", "ALL",
+        "--read-only", "--user", uid, "--cap-drop", "ALL",
         "--security-opt", "no-new-privileges", "--pids-limit", "64", "--memory", "768m",
         "--memory-swap", "768m", "--cpus", "2", "--ipc", "none",
-        "--tmpfs", "/workspace:rw,nosuid,nodev,size=256m,uid=65532,gid=65532,mode=700",
-        "--tmpfs", "/tmp:rw,nosuid,nodev,size=64m,uid=65532,gid=65532,mode=700",
+        *workspace,
+        "--tmpfs", "/tmp:rw,nosuid,nodev,size=64m,mode=1777",
         "--label", "dev.argo.worker=true", "--init", "-i", image,
     ]
 
@@ -76,22 +88,25 @@ def decode(code, output):
 
 
 class Workspace:
-    def __init__(self, check=lambda: None, image=None):
+    def __init__(self, check=lambda: None, image=None, project=None):
         self.check = check
         self.image = image or worker_image()
         self.name = "argo-code-" + uuid.uuid4().hex
         self.active = False
+        self.project = project_directory(project) if project is not None else None
 
     def __enter__(self):
         try:
-            args = options(self.name, self.image)
+            args = options(self.name, self.image, project=self.project)
             args.insert(2, "-d")
             code, _, _ = command([*args, "idle"], 30, self.check)
             if code:
                 raise RuntimeError("Cannot start the isolated workspace")
             self.active = True
             details = self.inspect()
-            if details["Mounts"] or details["HostConfig"]["NetworkMode"] != "none":
+            mounts = details["Mounts"]
+            mounted = self.project and len(mounts) == 1 and mounts[0]["Type"] == "bind" and mounts[0]["Destination"] == "/workspace" and mounts[0]["RW"] and Path(mounts[0]["Source"]).resolve() == self.project
+            if (not mounted if self.project else bool(mounts)) or details["HostConfig"]["NetworkMode"] != "none":
                 raise RuntimeError("Workspace isolation validation failed")
             return self
         except BaseException:
@@ -125,7 +140,7 @@ class Workspace:
             self.close()
             raise
         if action == "export":
-            validate_files(result["files"])
+            validate_files(result["files"], max_files=1000 if self.project else 100)
         return result
 
     def close(self):

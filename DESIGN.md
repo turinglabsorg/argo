@@ -25,7 +25,7 @@ Inherit the user's terminal monospace font. Do not download fonts or images. Use
 
 ## Layout and interaction
 
-- One-line brand bar: ARGO, purpose, and local-only inference.
+- One-line brand bar: ARGO, selected coding model and endpoint scope.
 - Conversation occupies the flexible left column. Use distinct speaker labels and whitespace, not a box around every message.
 - A 34-cell case sidebar shows scope, authorization, models, and run status. Hide below 100 columns; `/scope` remains available.
 - Chat, Findings, and Runs tabs keep reports and older sessions accessible.
@@ -33,7 +33,8 @@ Inherit the user's terminal monospace font. Do not download fonts or images. Use
 - First launch explains natural-language tasks, `/import`, `/diff`, `/agent-demo`, and advisory `/chat`. Legacy `/new` and `/open` manage engagements; authorization displays the exact contract before a separate operator action.
 - Findings use a table and a detail pane showing provenance, evidence identifiers, and remediation. Selecting a finding supplies context for the next chat question.
 - Plain text starts the isolated agent. Show its current tool/model and keep the offline code boundary visible. `/chat` is explicitly advisory. Tool calls cannot alter scope, MCP policy or host access.
-- `/import` copies a selected project; `/diff` previews exported modifications. Agent `/resume` restores verified files for a new container; `/reset` starts empty. Keep these controls distinct from the legacy engagement audit commands.
+- The launch directory is mounted read/write by default; display its path and direct-write status. `/workspace PATH` changes the selected directory. `/isolated` selects a disposable copy, while `/import` copies sources into that mode. `/diff` shows the changes already made. Resuming a report never mounts a path from that report automatically.
+- `/model` and F2 open coding settings: saved profile, protocol (Ollama, OpenAI-compatible, Anthropic-compatible), base URL, model ID, optional Hush credential name and JSON mode. Discover models or enter any model ID. Save applies to subsequent coding and coordination calls and persists globally. Keep the current workspace unchanged when switching models. Use a scrollable form with fixed Save/Cancel controls on narrow terminals.
 - Keep terminal interaction responsive with background workers. Stream chat output, expose current audit stage, and preserve completed reports under the existing private run directory.
 - Test at 140×44 and 80×24 cells with Textual Pilot, including form submission, cancellation, resume, and the isolated demo.
 

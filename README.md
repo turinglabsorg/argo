@@ -1,162 +1,149 @@
 # Argo
 
-A local cybersecurity agent that reviews vulnerabilities, creates code, applies fixes, and runs tests in an isolated Docker workspace.
+A cybersecurity agent that edits the project you open, runs code in Docker, and uses your choice of local or remote coding model.
 
-Use natural-language tasks in the TUI or CLI. Qwen3-Coder coordinates tools and writes code; Foundation-Sec and VulnLLM provide specialist security reviews. Generated code has no network, host mounts, Docker socket, credentials, or host shell. A separate immutable broker connects to explicitly configured remote MCP tools. Source audits and bounded authorized web checks also remain available through the engagement workflow.
+Launch Argo from a project directory: that directory is mounted read/write, and edits immediately change its files. F2 or /model selects any model ID through an Ollama, OpenAI-compatible or Anthropic-compatible endpoint. The selected model coordinates tools and writes code. Optional local Foundation-Sec and VulnLLM provide specialist reviews.
+
+Code executes in a non-root, offline container with only the selected project mounted. Provider credentials, the Docker socket and other host directories are not mounted. Files inside the selected project are accessible to its code. A separate immutable broker connects to configured remote MCP tools.
 
 ## Install
 
-Requirements: Python 3.12+, `uv`, Docker, and native Ollama. Start Docker and Ollama before installing scanner images and models.
+Requirements: Python 3.12+, uv and Docker. Native Ollama is optional when using a remote coding endpoint.
 
-```bash
-uv sync --frozen --dev
-uv run python scripts/install_scanners.py
-uv run python scripts/install_worker.py
-uv run python scripts/install_models.py
-uv run argo doctor
-```
+    uv sync --frozen --dev
+    uv run python scripts/install_worker.py
+    uv run argo doctor
 
-To install or resume only one model, use `uv run python scripts/install_models.py --model argo-coder:30b-a3b`. `--parallel N` controls 1–32 download connections; verified completed segments are retained between attempts.
+Install the terminal command with frozen dependency versions:
 
-Install the terminal command with the same dependency versions:
+    uv export --frozen --no-dev --no-emit-project --format requirements-txt --output-file /tmp/argo-constraints.txt >/dev/null
+    uv tool install --editable . --python 3.12 --constraints /tmp/argo-constraints.txt
 
-```bash
-uv export --frozen --no-dev --no-emit-project --format requirements-txt --output-file /tmp/argo-constraints.txt >/dev/null
-uv tool install --editable . --python 3.12 --constraints /tmp/argo-constraints.txt
-```
+For the optional local models, start Ollama and run:
 
-The model installer downloads checksum-verified GGUF artifacts from pinned Hugging Face revisions and creates three local Ollama aliases:
+    uv run python scripts/install_models.py
+
+To install or resume only the coder:
+
+    uv run python scripts/install_models.py --model argo-coder:30b-a3b
+
+The installer verifies the pinned GGUF hashes. The --parallel option accepts 1–32 download connections. Local aliases are defaults, not an allowlist for coding:
 
 | Alias | Model | Role |
 | --- | --- | --- |
-| `argo-foundation-sec:8b` | Foundation-Sec-8B-Reasoning, official Q4_K_M conversion | Security analysis and evidence review |
-| `argo-vulnllm:7b` | VulnLLM-R-7B, community Q4_K_M conversion | Source vulnerability review |
-| `argo-coder:30b-a3b` | Qwen3-Coder-30B-A3B-Instruct, Unsloth Q4_K_M conversion | Tool coordination, code generation and edits |
+| argo-coder:30b-a3b | Qwen3-Coder-30B-A3B-Instruct, Unsloth Q4_K_M | Default coding and coordination |
+| argo-foundation-sec:8b | Foundation-Sec-8B-Reasoning, official Q4_K_M | Optional security analysis |
+| argo-vulnllm:7b | VulnLLM-R-7B, community Q4_K_M | Optional source review |
 
-Model requests are sequential. The agent retains a model for up to five idle minutes; advisory audit/chat calls unload after generation. Configure Ollama with one loaded model and cloud mode disabled. Cloud model aliases are rejected. Exact weights, revisions, hashes, and provenance are in [models.lock.json](config/models.lock.json). Installation does not establish model accuracy on every language or vulnerability class.
+See [model provenance](config/models.lock.json). The legacy audit/chat commands retain local specialist adapters. Remote coding does not require the local models or a running Ollama service.
 
-## Create, test and repair code
+## Choose your coding model
 
-```bash
-argo agent 'Create a URL parser using the standard library, with pytest tests'
-argo agent 'Audit this code, reproduce defects with tests, and fix them' --import /absolute/path/to/project
-argo agent 'Add tests for malformed inputs' --continue RUN_ID
-argo agent-demo
-argo mcp-tools
-```
+Run argo, press **F2** or enter **/model**, then select or create a profile:
 
-Each task uses a new offline container. `/import` or `--import` copies sanitized source text; no project is mounted or modified in place. The agent writes and tests its copy. Code, `changes.diff`, tool evidence and reports are exported to a private `~/.argo/runs/RUN_ID/` directory, then the container is removed. Continuing a run verifies and copies its saved workspace into a fresh container. Python 3.12, its standard library, pytest and Bandit are installed; network package installation and host tools are unavailable.
+1. Choose Ollama, OpenAI-compatible or Anthropic-compatible.
+2. Enter your base URL and model ID.
+3. Optionally select a Hush credential by name.
+4. Use Models to discover IDs, or enter one manually.
+5. Test checks structured output without sending project source. Save applies the profile to subsequent coding and coordination calls.
 
-The live SQL lab asks the models to create regression tests, reproduce an injection defect, edit the implementation and retest. A separate deterministic check verifies normal, missing, apostrophe and injection inputs against the generated code. Model-generated tests alone are not an independent security assessment.
+Profiles persist in ~/.argo/models.json and are also used by the CLI. Saving does not change the selected project.
 
-See [the isolated-agent runtime](docs/isolated-agent.md) for tool contracts, MCP configuration, limits, and current boundaries.
+OpenAI-compatible profiles use Chat Completions; Anthropic-compatible profiles use Messages. HTTP(S) hosts, custom ports, proxy prefixes and arbitrary model IDs are supported. URLs can end at the API root or the full generation path. OpenAI profiles offer prompt-only JSON, JSON object and JSON schema modes, plus max_tokens or max_completion_tokens. Unsupported capabilities produce visible errors; Argo does not silently switch providers.
 
-## Terminal interface
+For authentication, install [Hush](https://github.com/turinglabsorg/hush), import the credential from Bitwarden with hush pull --name NAME, then enter only NAME in the form. Argo invokes hush run --redact and injects the key into a fixed provider process. API keys are never saved in model settings or sent to code workers. Leave the credential field empty for endpoints without authentication. Selecting a remote endpoint sends task context and selected source to it.
 
-Run `argo` to open the TUI, or `argo tui engagement.json` to load an existing case. All CLI subcommands remain available for scripts. Without a terminal, `argo` prints help.
+![Coding endpoint and model selection](docs/assets/model-settings.svg)
 
-The interface uses [Textual](https://github.com/Textualize/textual) under MIT. It shares Argo's Python controller and evidence store. The design draws on a terminal-first workflow; it is not a fork of Claude Code, Codex CLI, or OpenCode. [Toad](https://github.com/batrachianai/toad) is an alternative ACP frontend, and a possible future integration.
+## Edit the project you open
 
-![Argo TUI showing a completed isolated code change](docs/assets/agent.svg)
+    cd /path/to/project
+    argo
+
+Write a task directly in the TUI. The directory is mounted at /workspace, and code changes persist there, including when a later test fails or the task is cancelled. Argo checks whether selected files changed while the coding request was in flight before writing the response. Reports, code snapshots and changes.diff are also saved under ~/.argo/runs/RUN_ID/.
+
+CLI equivalents:
+
+    argo agent 'Fix this code and run the regression tests'
+    argo agent 'Audit the code and apply fixes' --project /absolute/path/to/project
+    argo agent 'Create a URL parser with pytest tests' --isolated
+    argo agent 'Add regression tests' --continue RUN_ID
+
+The default is the current directory. --isolated, --import and --continue use disposable workspaces instead. A saved snapshot cannot overwrite a mounted project. Home and filesystem root are rejected as project mounts.
+
+Python changes require passing pytest before completion. Other text files can be edited, with missing runtime verification explicitly recorded. Python 3.12, pytest and Bandit are installed. Network package installation and non-Python runners are not available. See [runtime contracts and limits](docs/isolated-agent.md).
+
+## Terminal controls
+
+The TUI uses [Textual](https://github.com/Textualize/textual) under MIT.
 
 | Interaction | Command |
 | --- | --- |
-| Create or modify code in Docker | Type a task, or `/agent TASK` |
-| Try the autonomous SQL repair lab | `/agent-demo` |
-| Copy selected sources into the next workspace | `/import /absolute/path/to/project` |
-| Start a fresh empty workspace | `/reset` |
-| Read the generated code diff | `/diff` |
-| View, disable or configure remote MCP access | `/mcp`, `/mcp off`, `/mcp /path/to/profile.json` |
-| Discuss a finding without executing tools | `/chat QUESTION` |
-| Create an engagement with a form | `/new` |
-| Open an engagement | `/open /absolute/path/to/engagement.json` |
-| Review targets, actions, and limits | `/scope` |
-| Record authorization for the displayed contract | `/authorize` |
-| Run the audit with both cyber models and Docker scanners | `/run` |
-| Run the legacy loopback audit fixture | `/demo` |
-| Inspect findings and select one as chat context | `/findings` |
-| Open a selected finding's first evidence record | `/evidence` |
-| Open a specific evidence record | `/evidence EVIDENCE_ID` |
-| Review saved runs | `/runs`, then select a row and press Enter |
-| Load a saved report | `/resume RUN_ID` |
-| Read the full report | `/report` |
-| Retest the loaded engagement against the selected run | `/retest` |
-| Select the chat model | `/model foundation` or `/model vulnllm` |
-| Cancel active work | Escape or `/stop` |
+| Create or change code | Type a task or /agent TASK |
+| Select coding endpoint and model | F2 or /model |
+| Show or change the mounted project | /workspace or /workspace PATH |
+| Switch to a disposable workspace | /isolated |
+| Copy sanitized sources into disposable mode | /import PATH |
+| Reset context while retaining the selected project | /reset |
+| Review changes already made | /diff |
+| Run the owned SQL repair lab | /agent-demo |
+| Configure remote MCP | /mcp, /mcp off, /mcp PROFILE.json |
+| Discuss findings without execution | /chat QUESTION |
+| Choose the separate advisory chat model | /model foundation or /model vulnllm |
+| Saved runs and reports | /runs, /resume RUN_ID, /report |
+| Inspect verified tool/finding evidence | /evidence or /evidence ID |
+| Service readiness | /doctor |
+| Stop active work | Escape or /stop |
 
-Plain text starts the isolated agent. Use `/chat` for advisory discussion of the current case or selected finding. Evidence is integrity-checked and redacted before entering model context. Tools are validated outside the model. Models differ in language support; Foundation-Sec's upstream model card lists English as its supported language.
+Tab completes commands; up/down recall prompts. Ctrl+L focuses input, Ctrl+R opens runs, F1 shows help, and Ctrl+Q stops work before closing. The sidebar hides below 100 columns; model settings remain available through F2.
 
-Tab completes commands, up/down recall prompts, Ctrl+L focuses the input, Ctrl+R opens saved runs, F1 lists commands, and Ctrl+Q stops active work before closing. The sidebar hides on narrow terminals. Reports persist locally; advisory chat history stays in memory. `/resume` restores an agent workspace for a new task, or reopens a legacy audit report. It does not replay interrupted actions.
+Resuming a mounted-project report does not change the selected directory. Disposable runs restore verified files into a new disposable workspace. Report contents never grant permission to mount another path, and interrupted side effects are never replayed.
 
-Use `/run --no-model` or `/demo --no-model` for explicit scanner-only operation. Add `--no-scanners` to use just the bundled static checks. `/doctor` reports service readiness. Full chat and audit validation details are recorded in [validation.md](docs/validation.md).
+## External MCP
 
-## Run the legacy audit demo from the CLI
+    argo mcp-tools
 
-```bash
-uv run argo demo --scanners
-```
+Public DeepWiki is enabled with a fixed repository-name enum. --no-mcp disables it. Additional public Streamable HTTP MCP servers need an operator-selected endpoint, tool allowlist and argument schemas, through --mcp-profile or /mcp. Calls run in a separate broker container with public DNS/IP checks and no project mount. MCP responses cannot change model, mount or permission settings.
 
-The demo creates a temporary repository, synthetic advisory data, and vulnerable/fixed SQLite HTTP fixtures on loopback. It checks that only the vulnerable HTTP fixture produces a confirmed SQL injection result. Fixture servers and source snapshots are removed after the run; reports remain under `~/.argo/runs/`.
+Authenticated/stdio MCP is not implemented. Coding-provider authentication is separate and uses Hush. The [CVE MCP sidecar contract](config/intelligence.contract.json) remains disabled.
 
-For a deterministic scanner-only test, explicitly use `--no-model`. A normal run requires its selected cyber models to be installed; there is no silent general-model or cloud fallback.
+## Security labs and legacy audits
 
-## Audit an authorized project
+    argo agent-demo
 
-```bash
-uv run argo init engagement.json --id my-audit --repo /absolute/path/to/project
-uv run argo plan engagement.json
-uv run argo authorize engagement.json --operator your-name --reference internal-audit-request
-uv run argo run engagement.json --scanners
-```
+This owned SQLite lab asks the models to create a failing regression, apply a parameterized-query fix and rerun unchanged tests. A separate container checks positive, missing, apostrophe, injection and data-integrity cases. Model-generated tests alone are not independent security proof.
 
-`authorize` records the operator's authorization for the exact normalized configuration, with a default four-hour expiry. It is not proof of ownership. Changing the scope, permitted actions, or limits invalidates it. Planning does not contact targets.
+The legacy engagement workflow adds authorization binding, source/dependency inventory, isolated Semgrep/Gitleaks, typed vulnerability intelligence and bounded authorized HTTP checks:
 
-Add an explicitly authorized web origin with `--origin https://your-staging-host`. Add `--active-web` to include bounded CORS and Git HEAD exposure checks. Review the generated engagement before authorizing it. Discovered origins are never automatically added to scope.
+    uv run python scripts/install_scanners.py
+    argo demo --scanners
+    argo init engagement.json --id my-audit --repo /absolute/path/to/project
+    argo plan engagement.json
+    argo authorize engagement.json --operator your-name --reference internal-audit-request
+    argo run engagement.json --scanners
 
-```bash
-uv run argo runs
-uv run argo status RUN_ID
-uv run argo report RUN_ID
-uv run argo verify RUN_ID
-uv run argo stop RUN_ID
-uv run argo retest engagement.json --previous RUN_ID --scanners
-```
+Add --origin to initialization for a selected staging origin and --active-web for bounded CORS/Git exposure checks. Authorization binds the exact normalized configuration and expires by default after four hours. It records the operator's authorization, not proof of ownership. Discoveries never expand scope automatically.
 
-Use `--state-dir /absolute/path` before the subcommand to change the evidence location. `verify` checks evidence hashes against the local manifest; it is not a signed attestation. Retest reports findings no longer detected without automatically claiming that they are fixed.
+TUI /new, /open, /scope, /authorize, /run, /demo, /findings and /retest retain this workflow. CLI run/status/report/verify/stop/retest commands remain available. Add --state-dir before the subcommand to select another evidence directory.
 
-## Current capabilities
+## Boundaries and verification
 
-- Source snapshots with symlink/file-type/size checks and sensitive-file exclusions; no repository installation or hooks.
-- Bundled Python/JavaScript checks, plus pinned Semgrep rules and Gitleaks in non-root, network-disabled Docker containers. Original source reaches Gitleaks through stdin; only redacted output is retained.
-- Exact dependency inventory for npm lockfile v2/v3, pinned `requirements.txt`, and registry packages in `uv.lock`. Unsupported formats appear as coverage gaps.
-- Cached offline intelligence and optional typed OSV, NVD, EPSS, and CISA KEV clients. Connected mode requires provider and disclosure permissions.
-- HTTP requests restricted to authorized origins, with DNS/peer checks, route exclusions, redirect validation, request/time budgets, and selected response headers only.
-- Bounded CORS checks and Git metadata exposure checks with negative controls. SQL injection validation is restricted to the explicit synthetic lab protocol.
-- Evidence-linked local model analysis, SQLite state, redacted Markdown/JSON reports, integrity manifests, cancellation, and retest comparisons.
+The selected project is intentionally writable and visible to generated code. This is a development container, not a malware-analysis VM. General network scanning, authenticated business-logic testing, cloud-account access and Nuclei/ZAP workers are not enabled. Legacy HTTP checks use a separate scoped native broker.
 
-## Boundaries
+Static and model findings remain suspected until deterministic validation. Secret redaction is pattern-based, and local evidence hashes are not signed attestations. The adapters accept compatible protocols, not every proprietary vendor extension. Models must follow the requested JSON/tool contract; availability and task quality remain endpoint-dependent.
 
-General network scanning, authenticated business-logic testing, Nuclei/ZAP workers, cloud-account access, and automatic writes to original projects are not enabled. Generated Python and copied project tests execute in the offline code worker. This is a development sandbox, not a malware-analysis VM. Legacy engagement HTTP checks use the native broker; neither their network permissions nor their scanner adapters are exposed to the isolated agent.
+    uv run ruff check src tests scripts
+    uv run python scripts/validate_design.py
+    uv run pytest -q
+    uv build
 
-External Streamable HTTP MCP access is implemented, with public DeepWiki enabled through a restricted repository-enum policy. `--no-mcp` disables it. Additional public MCP servers require an operator-supplied endpoint, tool allowlist and argument schemas. The separate `cve-mcp-server` sidecar remains disabled; [its contract](config/intelligence.contract.json) records that integration. Authenticated MCP, stdio servers and cloud model providers are not implemented. Do not put credentials in MCP profiles.
-
-Static findings and model interpretations remain suspected. Confirmation requires deterministic validation and a negative control. Missing tools, stale intelligence, parse failures, or incomplete analysis appear in report coverage. Secret detection is pattern-based and does not guarantee detection of every credential format.
-
-## Develop and verify
-
-```bash
-uv run ruff check src tests scripts
-uv run python scripts/validate_design.py
-uv run pytest -q
-uv build
-```
-
-The complete suite includes real offline code workers, Docker scanners and loopback fixture servers. Use `uv run pytest -q -m 'not live'` when Docker is unavailable. Tests mock remote providers and model responses; live model and MCP validation is performed separately with `argo agent-demo` and `argo mcp-tools`.
+Tests include real Docker workers/scanners, HTTP protocol fixtures, credential-process boundaries and TUI interaction. Actual model validation is separate and recorded in [validation.md](docs/validation.md). Use -m 'not live' when Docker is unavailable.
 
 - [Architecture](docs/architecture.md)
+- [Runtime and model settings](docs/isolated-agent.md)
 - [Research and original posts](docs/research.md)
-- [Roadmap and remaining work](docs/roadmap.md)
+- [Roadmap](docs/roadmap.md)
 - [Draft engagement example](config/engagement.example.json)
-- [Engagement structural schema](schemas/engagement.schema.json)
+- [Engagement schema](schemas/engagement.schema.json)
 
-Argo uses the MIT license. Models, scanner binaries/rules, and external services retain their upstream terms. Weights and scanner images are not included in the repository.
+Argo is MIT licensed. Models, scanners/rules and external services retain their upstream terms.

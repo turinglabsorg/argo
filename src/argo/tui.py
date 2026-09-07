@@ -25,16 +25,20 @@ from textual.widgets import (
 
 from argo.agent import import_sources, restore, run_agent
 from argo.agent_demo import demo as agent_demo
-from argo.agent_models import CODER
 from argo.chat import answer, display_text
 from argo.contracts import Actions, Engagement, Scope
 from argo.controller import Cancelled, run
 from argo.evidence import clean, read_evidence, read_state
 from argo.mcp import default_profile, load_profile
+from argo.model_dialog import ModelDialog
+from argo.providers import SETTINGS, load_settings
 from argo.scope import authorize, check_authorization, digest, load, normalize, save
 from argo.services import CYBER_MODELS, demo, doctor, run_path
+from argo.workspace import project_directory
 
 COMMANDS = [
+    "/workspace",
+    "/isolated",
     "/agent",
     "/agent-demo",
     "/chat",
@@ -60,7 +64,10 @@ COMMANDS = [
     "/help",
     "/quit",
 ]
-HELP = """Isolated agent     Type a task, or /agent TASK
+HELP = """Project agent      Type a task, or /agent TASK
+Coding model       /model or F2 (local / OpenAI / Anthropic)
+Mounted project    /workspace [PATH]
+Disposable mode    /isolated
 Agent SQL lab      /agent-demo
 Import project     /import /path/to/project
 Fresh workspace    /reset
@@ -84,10 +91,11 @@ Chat model         /model foundation | vulnllm
 Service readiness  /doctor
 Cancel work        /stop or Escape
 
-Plain text starts the agent in an offline Docker workspace. It can create and change code,
+Plain text starts the agent in an offline Docker container. It can create and change code,
 run Python, pytest and Bandit, and consult approved MCP tools through a separate broker.
-Code stays outside your projects: /import copies sanitized sources and /diff shows changes.
-/resume restores saved agent files for the next task. /reset starts empty.
+The launch directory is mounted read/write: changes go directly into your project.
+/isolated selects a disposable workspace. /import copies sources into that mode.
+/model chooses the coding endpoint and model. /diff shows changes already made.
 Tab completes commands. Up/down recall prompts. Reports and code are saved locally."""
 
 
@@ -248,10 +256,11 @@ class ArgoApp(App):
         Binding("ctrl+l", "prompt", "Prompt", priority=True),
         Binding("f1", "help", "Help"),
         Binding("ctrl+r", "runs", "Runs", priority=True),
+        Binding("f2", "coding_model", "Model", priority=True),
     ]
     CSS_PATH = "data/tui.tcss"
 
-    def __init__(self, state_root: Path, engagement_path: Path | None = None):
+    def __init__(self, state_root: Path, engagement_path: Path | None = None, *, project=..., settings_path=SETTINGS):
         super().__init__()
         self.state_root = state_root
         self.engagement_path = engagement_path
@@ -271,13 +280,16 @@ class ArgoApp(App):
         self.agent_seed = {}
         self.agent_profile = default_profile()
         self.agent_mcp = True
+        self.project = Path.cwd().resolve() if project is ... else project
+        self.settings_path = settings_path
+        self.coding = load_settings(settings_path).coding
 
     def ui(self, selector, widget_type):
         return self.screen_stack[0].query_one(selector, widget_type)
 
     def compose(self) -> ComposeResult:
         yield Static(
-            "  ARGO  /  security console                                      LOCAL INFERENCE",
+            "  ARGO  /  security console",
             id="brand",
             markup=False,
         )
@@ -299,6 +311,9 @@ class ArgoApp(App):
                         classes="muted",
                     )
             with VerticalScroll(id="sidebar"):
+                yield Static("PROJECT", classes="sidebar-title")
+                yield Static("", id="project-summary", markup=False)
+                yield Button("Coding model · F2", id="coding-settings")
                 yield Static("CASE FILE", classes="sidebar-title")
                 yield Static("No engagement loaded", id="scope-summary", markup=False)
                 yield Button("New audit", id="new-audit")
@@ -313,7 +328,7 @@ class ArgoApp(App):
                     classes="sidebar-help",
                     markup=False,
                 )
-        yield Static("Ready  ·  isolated workspace  ·  /agent-demo to try the lab", id="status", markup=False)
+        yield Static("Ready · /model selects coding · /workspace shows the project", id="status", markup=False)
         yield Prompt()
         yield Footer()
 
@@ -322,12 +337,13 @@ class ArgoApp(App):
         self.ui("#runs", DataTable).add_columns("Created", "Case", "Status", "Findings", "Run ID")
         self.say(
             "ARGO",
-            "Describe a task: Argo can create code, review vulnerabilities, make fixes and run tests inside Docker.\n\nThe code worker has no network, host files or credentials. /import copies a project into it; /diff shows exported changes. The next task continues that workspace.\nTry /agent-demo for a SQL injection repair with regression tests. /chat opens advisory discussion; /help lists commands.",
+            "Describe a task: Argo reads and edits the mounted project directly, then runs Python tests inside Docker.\n\n/model or F2 selects the coding model and any Ollama, OpenAI-compatible or Anthropic-compatible endpoint.\n/workspace shows the selected folder. /diff shows changes. /isolated switches to a disposable workspace.\n/agent-demo runs the owned SQL repair lab; /chat opens advisory discussion.",
         )
         if self.engagement_path:
             self.open_case(self.engagement_path)
         self.refresh_runs()
         self.refresh_case()
+        self.refresh_models()
         self.check_services()
         self.action_prompt()
 
@@ -354,6 +370,7 @@ class ArgoApp(App):
         self.ui("#activity", Static).update(display_text(text))
 
     def refresh_case(self):
+        self.ui("#project-summary", Static).update(display_text(str(self.project) + "\nREAD / WRITE" if self.project else "Disposable workspace\nNo project mounted"))
         if self.engagement:
             engagement = self.engagement
             targets = engagement.scope.repositories + engagement.scope.web_origins
@@ -368,8 +385,8 @@ class ArgoApp(App):
             )
         elif self.report_data:
             details = (
-                "ISOLATED WORKSPACE\n" + self.report_data["status"].upper()
-                + "\n\nType a task to continue.\n/diff reviews changes.\n/reset starts empty."
+                ("PROJECT RUN\n" if self.report_data.get("project") else "DISPOSABLE RUN\n") + self.report_data["status"].upper()
+                + "\n\nType a task to continue.\n/diff reviews changes.\n/reset clears task context."
                 if self.report_data.get("kind") == "isolated_agent"
                 else self.report_data["engagement_id"]
                 + "\nREPORT REVIEW\n\nOpen an engagement to run or retest."
@@ -387,8 +404,8 @@ class ArgoApp(App):
             if self.model in self.ready_models
             else ("Not installed" if self.ollama_status == "ready" else "Ollama " + self.ollama_status)
         )
-        coder = "Installed locally" if CODER in self.ready_models else "Not installed"
-        self.ui("#model-summary", Static).update(label + "\n" + state + "\n\nCODER / COORDINATOR\nQwen3-Coder · 30B / A3B\n" + coder + "\n\nCode: Docker / offline\nMCP: separate broker")
+        self.ui("#model-summary", Static).update(display_text(label + "\n" + state + "\n\nCODER / COORDINATOR\n" + self.coding.model + "\n" + self.coding.protocol + "\n" + self.coding.base_url + "\n\nCode: Docker / offline"))
+        self.ui("#brand", Static).update(display_text("  ARGO  /  " + self.coding.model + "  ·  " + self.coding.protocol))
 
     @work(thread=True, exit_on_error=False)
     def check_services(self):
@@ -465,6 +482,19 @@ class ArgoApp(App):
             command, args = parts[0], parts[1:]
             if command == "/help":
                 self.action_help()
+            elif command == "/model" and not args:
+                self.action_coding_model()
+            elif command == "/workspace" and len(args) <= 1:
+                if args:
+                    self.project = project_directory(args[0])
+                    self.agent_seed = {}
+                self.refresh_case()
+                self.say("ARGO", f"Mounted read/write for the next task: {self.project}" if self.project else "Disposable workspace. /workspace PATH selects a project.")
+            elif command == "/isolated" and not args:
+                self.project = None
+                self.agent_seed = {}
+                self.refresh_case()
+                self.say("ARGO", "The next task uses a disposable workspace. No project is mounted.")
             elif command == "/chat" and args:
                 self.start_chat(prompt[len("/chat "):])
             elif command == "/agent" and args:
@@ -477,7 +507,7 @@ class ArgoApp(App):
                 self.import_project(Path(args[0]))
             elif command == "/reset" and not args:
                 self.agent_seed = {}
-                self.say("ARGO", "The next agent task starts with an empty workspace. Saved runs remain available.")
+                self.say("ARGO", "Task context reset. The selected project is unchanged." if self.project else "The next task starts with an empty disposable workspace.")
             elif command == "/diff" and not args:
                 if not self.current_run or not (self.current_run / "changes.diff").is_file():
                     raise ValueError("Run or resume an isolated agent task first.")
@@ -620,7 +650,13 @@ class ArgoApp(App):
         self.finish()
 
     def start_agent(self, prompt):
-        self.begin("Starting isolated agent · " + CODER)
+        try:
+            if self.project is not None:
+                self.project = project_directory(self.project)
+        except ValueError as exc:
+            self.say("ERROR", str(exc))
+            return
+        self.begin("Starting agent · " + self.coding.model)
         self.agent_work(prompt)
 
     @work(thread=True, exit_on_error=False)
@@ -632,6 +668,7 @@ class ArgoApp(App):
             self.call_from_thread(self.task_failed, display_text(str(exc)))
 
     def import_done(self, files):
+        self.project = None
         self.agent_seed = files
         self.say("ARGO", f"Copied {len(files)} sanitized source files. The next task edits only this isolated copy.")
         self.set_status("Project copy ready")
@@ -642,10 +679,11 @@ class ArgoApp(App):
         try:
             options = {
                 "profile": self.agent_profile, "use_mcp": self.agent_mcp,
+                "coding": self.coding.model_copy(deep=True),
                 "cancelled": self.cancel_event.is_set,
                 "on_progress": lambda data: self.call_from_thread(self.progress, data),
             }
-            result = agent_demo(self.state_root, **options) if lab else run_agent(prompt, self.state_root, seed=self.agent_seed, **options)
+            result = agent_demo(self.state_root, **options) if lab else run_agent(prompt, self.state_root, seed=None if self.project else self.agent_seed, project=self.project, **options)
             self.call_from_thread(self.agent_done, result)
         except Exception as exc:
             self.call_from_thread(self.task_failed, display_text(str(exc)))
@@ -791,7 +829,15 @@ class ArgoApp(App):
             self.refresh_findings()
             self.refresh_case()
             if report.get("kind") == "isolated_agent":
+                if report.get("project"):
+                    self.agent_seed = {}
+                    self.ui("#views", TabbedContent).active = "chat-tab"
+                    self.say("ARGO", report["summary"] + f"\n\nChanged project: {report['project']}\nDiff: {path / 'changes.diff'}\nNext task uses the currently selected workspace: {self.project or 'disposable'}.")
+                    self.set_status("Reviewing project run " + identity[:12])
+                    return
+                self.project = None
                 self.agent_seed = restore(path)
+                self.refresh_case()
                 self.ui("#views", TabbedContent).active = "chat-tab"
                 self.say("ARGO", report["summary"] + f"\n\nCode: {path / 'code'}\nDiff: {path / 'changes.diff'}\n{len(self.agent_seed)} files restored. Type the next task to continue, or /reset to start empty.")
                 self.set_status("Reviewing agent run " + identity[:12])
@@ -807,7 +853,9 @@ class ArgoApp(App):
 
     @on(Button.Pressed)
     def button_clicked(self, event):
-        if event.button.id == "new-audit":
+        if event.button.id == "coding-settings":
+            self.action_coding_model()
+        elif event.button.id == "new-audit":
             self.dispatch("/new")
         elif event.button.id == "run-audit":
             self.dispatch("/run")
@@ -817,6 +865,17 @@ class ArgoApp(App):
     def action_prompt(self):
         if not isinstance(self.screen, ModalScreen):
             self.ui("#prompt", Input).focus()
+
+    def action_coding_model(self):
+        if not self.busy and not isinstance(self.screen, ModalScreen):
+            self.push_screen(ModelDialog(self.settings_path), self.coding_selected)
+
+    def coding_selected(self, profile):
+        if profile:
+            self.coding = profile
+            self.refresh_models()
+            self.say("ARGO", f"Coding and coordination: {profile.model}\n{profile.protocol} · {profile.base_url}\nSaved for subsequent tasks. Project selection is unchanged.")
+        self.action_prompt()
 
     def action_help(self):
         self.ui("#views", TabbedContent).active = "chat-tab"

@@ -98,7 +98,7 @@ class MCP:
         return data["result"]
 
     def run(self, name=None, arguments=None):
-        initialized = self.request("initialize", {"protocolVersion": self.protocol, "capabilities": {}, "clientInfo": {"name": "argo", "version": "0.2.0"}})
+        initialized = self.request("initialize", {"protocolVersion": self.protocol, "capabilities": {}, "clientInfo": {"name": "argo", "version": "0.3.0"}})
         if initialized.get("protocolVersion") not in {"2024-11-05", "2025-03-26", "2025-06-18"}:
             raise ValueError("Unsupported MCP protocol")
         self.protocol = initialized["protocolVersion"]

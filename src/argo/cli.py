@@ -7,11 +7,12 @@ from pathlib import Path
 
 from argo.agent import import_sources, restore, run_agent
 from argo.agent_demo import demo as agent_demo
-from argo.agent_models import CODER, MODELS
+from argo.agent_models import MODELS
 from argo.contracts import Actions, Engagement, Scope
 from argo.controller import run
 from argo.evidence import read_state, redact, verify
 from argo.mcp import MCPClient, default_profile, load_profile
+from argo.providers import load_settings
 from argo.scope import ScopeError, authorize, digest, load, normalize, save
 from argo.services import CYBER_MODELS, DEFAULT_STATE, demo, doctor, run_path
 from argo.tui import ArgoApp
@@ -34,10 +35,12 @@ def main():
             inputs = sub.add_mutually_exclusive_group()
             inputs.add_argument("--import", dest="source", type=Path, help="Copy sanitized project sources; originals stay outside the worker")
             inputs.add_argument("--continue", dest="previous", help="Continue the verified workspace of a saved run")
+            inputs.add_argument("--project", type=Path, help="Mount this directory read/write (default: current directory)")
+            inputs.add_argument("--isolated", action="store_true", help="Use a disposable workspace without a project mount")
         sub.add_argument("--no-mcp", action="store_true")
         sub.add_argument("--mcp-profile", type=Path)
         sub.add_argument("--max-steps", type=int, default=24)
-        sub.add_argument("--planner", choices=MODELS, default=CODER)
+        sub.add_argument("--planner", choices=MODELS, help="Explicit local coordinator override; otherwise use the TUI-selected coding profile")
     commands.add_parser("mcp-tools").add_argument("--profile", type=Path)
     init = commands.add_parser("init")
     init.add_argument("file", type=Path)
@@ -86,14 +89,19 @@ def main():
             options = {
                 "use_mcp": not args.no_mcp,
                 "profile": load_profile(args.mcp_profile) if args.mcp_profile else None,
-                "max_steps": args.max_steps, "planner": args.planner,
+                "max_steps": args.max_steps,
                 "on_progress": lambda event: print(json.dumps(event), file=sys.stderr, flush=True),
             }
+            if args.planner:
+                options["planner"] = args.planner
+            else:
+                options["coding"] = load_settings().coding
             if args.command == "agent-demo":
                 output = agent_demo(args.state_dir, **options)
             else:
                 seed = import_sources(args.source) if args.source else (restore(run_path(args.state_dir, args.previous)) if args.previous else {})
-                output = run_agent(args.task, args.state_dir, seed=seed, **options)
+                project = None if args.source or args.previous or args.isolated else (args.project or Path.cwd())
+                output = run_agent(args.task, args.state_dir, seed=seed, project=project, **options)
         elif args.command == "mcp-tools":
             client = MCPClient(load_profile(args.profile) if args.profile else default_profile())
             output = {"server": client.profile.name, "tools": client.discover()}

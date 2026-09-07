@@ -55,7 +55,7 @@ async def test_tui_create_authorize_run_resume_report(tmp_path):
     repo.mkdir()
     (repo / "app.py").write_text("def evaluate(user_input):\n    return eval(user_input)\n")
     target = tmp_path / "engagement.json"
-    app = ArgoApp(tmp_path / "runs")
+    app = ArgoApp(tmp_path / "runs", project=None, settings_path=tmp_path / "models.json")
     async with app.run_test(size=(140, 44)) as pilot:
         app.dispatch("/new")
         await pilot.pause()
@@ -117,7 +117,7 @@ async def test_tui_stream_chat_context_and_cancellation(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_tui_demo_positive_and_negative_controls(tmp_path):
-    app = ArgoApp(tmp_path / "runs")
+    app = ArgoApp(tmp_path / "runs", project=None, settings_path=tmp_path / "models.json")
     async with app.run_test(size=(140, 44)) as pilot:
         app.dispatch("/demo --no-model --no-scanners")
         await wait_idle(app, pilot)
@@ -281,7 +281,7 @@ async def test_tui_agent_edits_tests_diff_and_continuation(tmp_path, monkeypatch
     ])
     monkeypatch.setattr("argo.agent.structured", lambda *a, **k: next(decisions))
     monkeypatch.setattr("argo.agent.edit", lambda *a, **k: {"app.py": "def answer():\n    return 42\n", "test_app.py": "from app import answer\ndef test_answer():\n    assert answer() == 42\n"})
-    app = ArgoApp(tmp_path / "runs")
+    app = ArgoApp(tmp_path / "runs", project=None, settings_path=tmp_path / "models.json")
     async with app.run_test(size=size) as pilot:
         app.dispatch("/mcp off")
         app.dispatch("Create a function returning 42 and test it")

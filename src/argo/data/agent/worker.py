@@ -13,6 +13,8 @@ from pathlib import PurePosixPath
 ROOT = "/workspace"
 MAX_FILE = 96 * 1024
 MAX_TOTAL = 2 * 1024 * 1024
+MAX_FILES = 1000 if os.environ.get("ARGO_PROJECT_MOUNT") == "1" else 100
+EXCLUDED = {"__pycache__", "node_modules", "vendor", "dist", "build", "target", "venv"}
 
 
 def parts(name):
@@ -82,7 +84,7 @@ def write_file(name, content):
 def files():
     result, size = {}, 0
     for directory, folders, names in os.walk(ROOT, followlinks=False):
-        folders[:] = sorted(p for p in folders if not p.startswith(".") and p != "__pycache__")
+        folders[:] = sorted(p for p in folders if not p.startswith(".") and p not in EXCLUDED)
         for name in sorted(names):
             if name.startswith(".") or name.endswith(".pyc"):
                 continue
@@ -92,7 +94,7 @@ def files():
             except (ValueError, OSError, UnicodeError):
                 continue
             size += len(content.encode())
-            if len(result) >= 100 or size > MAX_TOTAL:
+            if len(result) >= MAX_FILES or size > MAX_TOTAL:
                 raise ValueError("Workspace export budget exceeded")
             result[path] = content
     return result
@@ -134,6 +136,13 @@ def dispatch(request):
             raise ValueError("Write budget exceeded")
         for name in values:
             parts(name)
+        for name, expected in request.get("expected", {}).items():
+            try:
+                actual = read_file(name)
+            except FileNotFoundError:
+                actual = None
+            if actual != expected:
+                raise ValueError("File changed while the model was working: " + name + ". Read it again before editing.")
         for name, content in values.items():
             write_file(name, content)
         return {"written": sorted(values)}

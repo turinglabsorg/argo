@@ -1,3 +1,30 @@
+# Project editing and model endpoints — 2026-09-07
+
+Version 0.3 changes the default to a writable project mount and adds coding-provider selection in the TUI. The previous validation record below describes the older disposable-only behavior.
+
+## Runtime evidence
+
+- Actual TUI run: 0fc9d660326c48a68e9645eb27b975f7.
+- Coding and coordination used argo-coder:30b-a3b through Ollama's OpenAI-compatible endpoint at http://127.0.0.1:11434/v1, with JSON object mode.
+- The project was a dedicated temporary directory mounted read/write. Its existing add(a, b) implementation incorrectly subtracted.
+- The model read the source and test, ran the failing regression, changed calculator.py in the actual mounted directory, and reran the unchanged test successfully.
+- The saved run completed with six tool calls and ten verified evidence files. A new container independently reran pytest successfully. The modified source remained on the host after container removal.
+- OpenAI and Anthropic protocol integration fixtures independently exercised full coordination, code generation, mounted writes and pytest. They use real local HTTP servers with controlled model responses, not paid vendor inference.
+- TUI tests selected both protocols through F2, saved endpoint/model settings, ran project edits and checked persistence after reopening at 140×44 and 80×24.
+- Provider tests cover SSE, JSON responses, model discovery, proxy prefixes, response format/token options, 401 errors, Bearer and x-api-key delivery, and the fixed credential child. Synthetic credentials never appear in child output.
+- Docker tests verify the single writable project mount, host-visible writes, inaccessible files outside the project, no Docker socket, and conflict rejection when an external editor changes a file during a model request.
+- JavaScript text editing is tested separately and explicitly records missing runtime verification; no JavaScript execution support is claimed.
+
+Hush was installed from its published release with a verified checksum. The actual provider credential bridge was tested with synthetic credentials. No paid OpenAI or Anthropic account was contacted, and no user API key was requested or inspected.
+
+The worker was rebuilt from pinned inputs; the installed local image is sha256:a80d0719319c9e46fda5523b43ef11cbbb6f87cecf0a3e82c79174a8f8f47bac. Project access is intentionally broader than the earlier disposable mode: generated Python can read and write the selected directory. It has no other host mount or network access.
+
+## Checks
+
+The final local suite passed 100 tests in 48.12 seconds. Ruff and structural documentation validation passed; the 0.3 source distribution and wheel built successfully. The global argo command was updated with frozen dependency constraints. API compatibility and small smoke tasks do not establish arbitrary model reliability or broad pentest coverage.
+
+---
+
 # Local validation — 2026-09-06
 
 This records smoke tests of Argo 0.2 and the earlier advisory MVP, not a model benchmark or a claim of complete pentest coverage. No third-party target was tested. The external MCP checks used public documentation tools.

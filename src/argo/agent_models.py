@@ -9,6 +9,7 @@ from jsonschema import Draft202012Validator
 from argo.chat import display_text
 from argo.evidence import clean
 from argo.inference import ENDPOINT, local_models
+from argo.providers import generate
 
 CODER = "argo-coder:30b-a3b"
 ANALYST = "argo-foundation-sec:8b"
@@ -16,7 +17,9 @@ REVIEWER = "argo-vulnllm:7b"
 MODELS = [CODER, ANALYST, REVIEWER]
 
 
-def structured(model, messages, schema, check=lambda: None, tokens=4096):
+def structured(model, messages, schema, check=lambda: None, tokens=4096, profile=None):
+    if profile is not None:
+        return generate(profile, messages, schema, check, tokens)
     if model not in MODELS:
         raise ValueError("Only installed, explicitly configured local roles are permitted")
     started = time.monotonic()
@@ -49,12 +52,12 @@ def structured(model, messages, schema, check=lambda: None, tokens=4096):
 
 def ready():
     installed = {item["name"] for item in local_models()}
-    missing = set(MODELS) - installed
+    missing = {CODER} - installed
     if missing:
         raise RuntimeError("Install missing local roles with scripts/install_models.py: " + ", ".join(sorted(missing)))
 
 
-def edit(instruction, paths, files, check=lambda: None, task="", feedback=None):
+def edit(instruction, paths, files, check=lambda: None, task="", feedback=None, profile=None):
     schema = {
         "type": "object", "properties": {"files": {"type": "array", "minItems": 1, "maxItems": len(paths), "items": {
             "type": "object", "properties": {"path": {"type": "string", "enum": paths}, "content": {"type": "string", "maxLength": 96000}},
@@ -68,7 +71,7 @@ def edit(instruction, paths, files, check=lambda: None, task="", feedback=None):
     available = set(sys.stdlib_module_names) | {"pytest", "bandit", "yaml", "rich", "pluggy", "packaging", "stevedore", "pygments", "markdown_it", "mdurl", "iniconfig"}
     available |= {path.split("/")[0].removesuffix(".py") for path in files.keys() | set(paths)}
     for attempt in range(3):
-        result = structured(CODER, messages, schema, check, tokens=6144)
+        result = structured(profile.model if profile else CODER, messages, schema, check, tokens=6144, **({"profile": profile} if profile else {}))
         values = {item["path"]: item["content"] for item in result["files"]}
         try:
             if len(values) != len(result["files"]):

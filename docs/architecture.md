@@ -1,6 +1,6 @@
 # Architecture
 
-Status: implemented isolated code agent plus a broader target architecture. The current capability boundary is documented in README.md and [isolated-agent.md](isolated-agent.md). Textual and CLI now run a schema-validated model/tool loop, a separate local coder, offline code execution, pytest, Bandit, and restricted external MCP. Native scoped HTTP checks and the deterministic engagement audit remain available separately. Network-enabled third-party scanners and the external CVE MCP sidecar remain deferred.
+Status: implemented isolated code agent plus a broader target architecture. The current capability boundary is documented in README.md and [isolated-agent.md](isolated-agent.md). Textual and CLI now run a schema-validated model/tool loop, a selectable local/remote coder, a read/write project mount, offline code execution, pytest, Bandit, and restricted external MCP. Native scoped HTTP checks and the deterministic engagement audit remain available separately. Network-enabled third-party scanners and the external CVE MCP sidecar remain deferred.
 
 The sections below describe the broader engagement architecture. Its network gateways, full finding-confirmation loop and scanner inventory must not be confused with the implemented offline code agent. The exact shipped boundary, tool names, resource limits, artifact format and continuation behavior are specified in [isolated-agent.md](isolated-agent.md).
 

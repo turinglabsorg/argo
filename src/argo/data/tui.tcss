@@ -34,7 +34,7 @@ Underline > .underline--bar { color: #83cec6; background: #201d1d; }
 .compact #sidebar { display: none; }
 .sidebar-title { color: #b4abaa; text-style: bold; margin-top: 1; margin-bottom: 1; }
 .sidebar-help { color: #b4abaa; margin-top: 2; }
-#scope-summary, #model-summary, #activity { height: auto; margin-bottom: 1; }
+#scope-summary, #model-summary, #activity, #project-summary { height: auto; margin-bottom: 1; }
 #sidebar Button { width: 100%; margin-top: 1; }
 Button {
     background: #302c2c;
@@ -83,3 +83,8 @@ ModalScreen { align: center middle; background: #201d1d 80%; }
 .dialog-actions Button { margin-right: 2; }
 .muted { color: #b4abaa; height: auto; }
 #form-error { color: #f28e85; height: auto; }
+#model-dialog { width: 88; max-width: 96%; height: 94%; background: #292525; border: solid #83cec6; padding: 1 2; }
+#model-fields { height: 1fr; }
+#model-fields Label { margin-top: 0; color: #b4abaa; }
+#coding-result { height: auto; max-height: 3; margin-top: 1; color: #83cec6; }
+#model-dialog .dialog-actions Button { min-width: 10; width: 1fr; margin-right: 1; }

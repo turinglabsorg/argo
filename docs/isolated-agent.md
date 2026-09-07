@@ -1,76 +1,76 @@
-# Isolated agent runtime
+# Containerized agent runtime
 
-The default TUI interaction and `argo agent` implement an actual tool loop. The coordinator chooses one action and its arguments, the controller validates them, a reviewed adapter executes it, and the next model turn receives the observed result. Assistant action messages and observed results remain in a bounded conversational history, with a compact record of completed tools. The separate coder receives the original operator requirements, current edit instruction, selected source and recent test feedback. It stops on completion, cancellation, failure, or a bounded action/deadline budget. This is distinct from the legacy deterministic engagement audit.
+Version 0.3 defaults to direct project editing. The TUI and CLI mount their launch directory read/write at /workspace. The operator can select another directory with /workspace or --project, or use /isolated, --isolated, --import or --continue for disposable mode. Generated code executes inside Docker; the trusted controller communicates with Docker, model endpoints and the separate MCP broker.
 
-## Models and tools
+## Model selection
 
-| Role / tool | Implementation |
+F2 or /model opens persistent coding settings. One selected profile supplies both the coordinator and the separate coder call. Local security specialists remain optional adapters. Remote coding does not require Ollama.
+
+| Protocol | Generation | Discovery | Credential |
+| --- | --- | --- | --- |
+| Ollama | /api/chat, schema-constrained NDJSON | /api/tags | Optional Bearer |
+| OpenAI-compatible | /chat/completions, SSE or JSON | /models | Optional Bearer |
+| Anthropic-compatible | /messages, SSE or JSON | /models | Optional x-api-key |
+
+HTTP(S) URLs accept custom hosts, ports and proxy prefixes. An empty path defaults to /v1 for compatible APIs. Existing API-root paths are preserved; full generation URLs are accepted. No model-name allowlist or silent provider fallback applies to coding. Manual IDs work when discovery is unsupported.
+
+OpenAI output modes are prompt-only JSON, JSON object and JSON schema. Prompt-only is the broadest default because compatible servers differ in response_format support. The token field can be max_tokens or max_completion_tokens. Anthropic uses a separate system field, merged adjacent turns and anthropic-version 2023-06-01. Responses API-only endpoints and proprietary authentication extensions are not supported by the Chat Completions adapter.
+
+Outputs are parsed and validated against the controller's JSON schema. The reader handles Ollama NDJSON, OpenAI deltas and Anthropic text deltas, rejecting incomplete streams and explicit provider errors. HTTP errors do not expose response bodies. Requests have connection/read deadlines, a 300-second stream budget and a 2 MiB response bound. Generated code and tool output cannot reconfigure providers.
+
+References: [OpenAI Chat Completions](https://developers.openai.com/api/reference/resources/chat), [Anthropic Messages](https://platform.claude.com/docs/en/api/messages/create), [Anthropic streaming](https://platform.claude.com/docs/en/build-with-claude/streaming).
+
+## Settings and credentials
+
+The controller atomically persists ~/.argo/models.json with private permissions. ModelSettings contains an active profile name and up to 30 uniquely named CodingProfile objects. Each profile contains name, protocol, base_url, model, credential, output_mode, token_parameter and max_tokens. The credential field is a Hush secret name, never an API key.
+
+The TUI provides profiles, discovery, an explicit synthetic model test and manual entry. Save affects subsequent tasks; an active task's profile is immutable. Model selection does not change the project. Settings are global and used by the CLI; explicit --planner retains a local coordinator override.
+
+Authenticated calls invoke hush run --name NAME --env ARGO_PROVIDER_KEY --redact with the fixed argo.provider_worker module. The request arrives over stdin; the key is injected into that native child, removed from its environment after reading, and used only for the selected endpoint. The child returns filtered results and cannot execute model code or arbitrary commands. Neither keys nor the Hush vault enter Docker. Unauthenticated profiles make no credential lookup.
+
+Selecting a remote profile authorizes sending task context and selected source to its endpoint. Source redaction is pattern-based, not complete data-loss prevention. Model tests send a synthetic JSON request without project source.
+
+## Agent loop and tools
+
+The coordinator chooses an action and parameters. The controller validates both the envelope and selected tool schema, executes a reviewed adapter, and retains bounded assistant/action/result turns. The coder receives the original task, edit instruction, selected source and latest test feedback.
+
+| Tool | Behavior |
 | --- | --- |
-| Coordinator | Local `argo-coder:30b-a3b`; `--planner` can explicitly select either installed specialist |
-| Coder | Local `argo-coder:30b-a3b`, a separate schema-constrained call producing complete files |
-| Security review | Local `argo-foundation-sec:8b` or `argo-vulnllm:7b`; findings remain suspected |
-| `workspace.list`, `workspace.read` | Bounded relative-path text access inside the container |
-| `code.edit` | Coder may modify only the requested relative paths |
-| `python.run` | Fixed Python executable, selected workspace script, no shell or command-line arguments |
-| `python.tests` | Fixed `python -m pytest -q -p no:cacheprovider` invocation |
-| `bandit.scan` | Fixed recursive Bandit JSON scan, excluding the tests directory |
-| `mcp.TOOL` | Discovered remote tool intersected with operator policy and server argument schema |
-| `finish` | Returns a summary; changed workspaces require a successful pytest run against unchanged file contents |
+| workspace.list / workspace.read | Bounded relative-path source access |
+| code.edit | Selected coder returns complete contents for explicitly named files |
+| python.run | Fixed Python executable with one workspace script |
+| python.tests | Fixed pytest invocation over the project |
+| bandit.scan | Recursive Bandit scan |
+| security.review | Optional local Foundation-Sec or VulnLLM |
+| mcp.TOOL | Remote tool intersected with operator policy |
+| finish | Saves the result and code diff |
 
-Python's standard library, pytest 8.4.2 and Bandit 1.8.6 are installed. No general shell tool is exposed; generated Python can launch subprocesses inside the same offline container and its resource limits. Network package downloads, authenticated browser workflows and non-Python test runners are not available. The coder can produce other text files, but the current execution toolchain is Python. Cloud coders are not configured; source stays in local inference.
+Python changes require passing pytest against unchanged file contents. Non-Python text edits can complete with a recorded lack of runtime verification. Python 3.12, standard library, pytest and Bandit are installed. Network installation and non-Python runners are unavailable. Generated tests are not independent security proof.
 
-## Execution boundary
+## Project mount
 
-The native trusted controller alone talks to Docker and loopback Ollama. Generated code and project tests run inside a Docker Desktop Linux container with:
+Only an operator-selected canonical directory is mounted. Home and filesystem root are rejected. Models cannot choose another host path, Docker flag or image. Worker inspection checks that exactly one writable bind mount maps the selected project to /workspace. Disposable mode has no bind mounts.
 
-- No bind mounts or volumes; `/workspace` and `/tmp` are private tmpfs filesystems.
-- `--network none`, including no access to Ollama, the host, metadata services or public targets.
-- User/group `65532`, read-only root, dropped capabilities, default seccomp, no new privileges and private process namespaces.
-- 768 MiB memory including swap, two CPUs, 64 processes, 256 MiB workspace and 64 MiB temporary storage.
-- A 50-second execution budget and bounded stdout/stderr. Cancellation or adapter timeout removes the entire container, including detached descendants.
+Project mode uses the operator UID/GID; disposable mode uses 65532. Both use offline networking, read-only root, dropped capabilities, no-new-privileges, private process namespaces, default seccomp, 768 MiB memory including swap, two CPUs, 64 processes and bounded /tmp. The project intentionally exposes all its contents to generated Python, including hidden files. It is not a boundary between files within the project.
 
-All adapter code is baked into an image built from a pinned Python base and hash-locked dependencies. `scripts/install_worker.py` records the built image's content digest in `~/.argo/worker.json`; execution uses that digest, not a mutable tag. No secrets, environment files or source checkout are copied into the image build context. Rebuild after changing worker code.
+The immutable adapter lives in the pinned worker image outside the mount. Model-facing file operations reject traversal, hidden path components, symlinks and hard links, using directory descriptors and O_NOFOLLOW. Edits compare selected files with pre-generation contents before writing; known concurrent changes produce a conflict. This is a best-effort check, not a filesystem transaction or lock against external editors.
 
-This boundary relies on Docker Desktop, its VM and the host kernel. It is not intended for malware or container-escape research. Normal completion, cancellation and handled errors remove the container. Abrupt controller or machine failure may leave an Argo-labelled container; inspect and remove that specific container before resuming. Saved tasks restart from verified files, never by replaying unknown external side effects.
+Snapshots skip hidden/dependency/build directories, binary/unreadable files and files above 96 KiB. Limits are 1,000 text files in project mode (100 in disposable mode), 2 MiB aggregate and 6 MiB serialized. Oversized snapshots fail visibly. These adapter bounds do not limit Python to the same files; Python can access the whole selected project.
 
-## Imports, output and continuation
+Execution has a 50-second deadline and bounded output. Cancellation removes the container and detached descendants. Already-written project changes remain after cancellation, timeout or test failure. There is no automatic rollback. Abrupt controller failure can leave a container. This is a development container, not a malware-analysis VM.
 
-The operator can explicitly import one project directory. The controller reads selected text formats through the existing bounded source inventory, excludes secret/configuration and dependency directories, rejects symlinks and hard-linked/nonregular files, and redacts recognized secrets. Redaction is pattern-based and may alter source behavior; it is not a complete secret detector. Home and filesystem root are rejected. The model cannot choose host paths or import another directory.
+## Reports and continuation
 
-Workspace paths must be visible relative paths without traversal, hidden components or control characters. Reads and writes walk directory descriptors with `O_NOFOLLOW`; exports accept bounded regular UTF-8 files only. Limits are 100 files, 96 KiB per file, 2 MiB aggregate, and 6 MiB serialized workspace. Oversized imports fail visibly.
+Each run stores code snapshots, changes.diff, model metadata, tool records, test-file hashes and integrity evidence. Reports retain kind: isolated_agent for compatibility and add project and coding_profile.
 
-Each run exports a `code/` tree and unified `changes.diff` under its private run directory. The model cannot select a host output location or apply changes to original projects. Reports and tool records are redacted. A workspace snapshot is stored as hashed evidence; `--continue RUN_ID` and TUI `/resume RUN_ID` validate it and seed a fresh offline container. TUI follow-up tasks continue the last workspace; `/reset` starts empty. Arbitrary process or interpreter state is not restored.
+Reopening a mounted-project report does not change the selected directory. Report paths never authorize mounts. Disposable snapshots are verified before restoration. --continue always restores into disposable mode; it never overwrites the current project. /reset clears context without reverting files.
+
+The owned SQL demo always uses disposable mode and independently verifies generated code in a fresh container. Failing-then-passing unchanged regressions, production changes and independent controls gate its completion.
 
 ## External MCP
 
-Remote calls execute in a separate immutable container with no code workspace or host mounts. Its reviewed adapter supports HTTPS Streamable HTTP, initialization, JSON-RPC responses, JSON and SSE transport, session headers, tool discovery and tool calls. It never executes server-initiated callbacks, sampling requests, prompts, local commands or resources. Redirects are rejected. DNS answers must all be public; a validated address is pinned for the TLS connection with hostname verification. Responses, requests, pagination and elapsed time are bounded.
+MCP runs in a separate immutable bridge-network container without the project. Its adapter implements bounded HTTPS Streamable HTTP initialization, sessions, JSON/SSE discovery and calls. It rejects redirects and non-public DNS, pins a validated address for TLS, and never executes server callbacks, sampling or local commands.
 
-The broker has Docker bridge networking, but accepts only the reviewed MCP protocol operation. Generated code never runs in it. The application-level endpoint policy does not claim to be a general-purpose firewall for arbitrary code.
+Default DeepWiki exposes only read_wiki_structure with four permitted public repositories. Custom public profiles explicitly select endpoint, tools and schemas. Calls must pass both operator and discovered schemas; references and regex constraints are rejected. Responses cannot alter model, mount or permission settings.
 
-The default [DeepWiki server](https://docs.devin.ai/work-with-devin/deepwiki-mcp) needs no authentication. Only `read_wiki_structure` is exposed, and its `repoName` argument must be one of `python/cpython`, `pallets/flask`, `psf/requests`, or `pytest-dev/pytest`. Thus default MCP calls cannot upload source or arbitrary text. Model responses from MCP are untrusted evidence, not instructions.
-
-Use `argo mcp-tools` to verify discovery. `argo agent TASK --no-mcp` disables outbound MCP calls. An additional public server can be selected with `--mcp-profile FILE` or TUI `/mcp FILE`. Example:
-
-```json
-{
-  "name": "deepwiki",
-  "endpoint": "https://mcp.deepwiki.com/mcp",
-  "tools": [{
-    "name": "read_wiki_structure",
-    "arguments": {
-      "type": "object",
-      "properties": {"repoName": {"const": "python/cpython"}},
-      "required": ["repoName"],
-      "additionalProperties": false
-    }
-  }]
-}
-```
-
-The operator profile is the disclosure and action boundary. Every call must pass both its schema and the discovered server schema. Only explicitly listed tools are available; tool annotations cannot grant permissions. Schema references and regex constraints are rejected to avoid external resolution and untrusted regex execution in the controller. Prefer enums and constants for identifiers. A profile accepting arbitrary strings can disclose those strings to its server. No automatic profile expansion, authenticated MCP, local stdio servers, or secret-bearing URLs are supported. MCP failure is recorded as a coverage gap; it does not silently enable another provider.
-
-## Evidence and confidence
-
-`report.json` records `kind: isolated_agent`, status, model roles, tool evidence references, summary, coverage gaps, workspace evidence, and artifact paths. `report.md`, `state.sqlite` and the standard evidence manifest support inspection with existing run/report/verify commands. An action failure or missing test runner cannot be reported as a successful test. Reaching the action budget yields `incomplete`.
-
-Model reviews and generated regression tests are not independent proof of security. The owned SQL demo separately validates the generated implementation with deterministic positive, negative, injection and data-integrity checks. The wider held-out accuracy evaluation remains future work.
+Authenticated/stdio MCP and the CVE sidecar remain unimplemented. MCP authentication is separate from coding-provider authentication.
