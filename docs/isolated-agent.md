@@ -155,7 +155,7 @@ Reports and the Findings detail pane retain both review phases, decisions, test 
 
 The local HTTP reader polls cancellation during connection, model loading and silent stream periods every 0.2 seconds, and cancels/closes pending asynchronous requests. The synchronous public review API runs this reader in its own worker event loop. Interleaved TUI updates reuse a message per reviewer and never mark another reviewer finished merely because its peer emits a token.
 
-A task using Foundation-Sec, Qwen or all reviewers expands its overall deadline from 30 minutes to four hours, while keeping per-request and step bounds. Foundation-Sec and VulnLLM retain their 16,384-token contexts and 4,096→8,192 output budgets. Ollama decides whether the models fit in memory together; concurrent dispatch does not prove simultaneous inference. The legacy audit and advisory chat commands retain their two original specialist adapters.
+Connected security audits and tasks declaring required Foundation-Sec or Qwen reviews receive a four-hour overall deadline from the start, including initial inventory and source reading. Other tasks start at 30 minutes and expand to four hours when they first invoke Foundation-Sec, Qwen or the reviewer team. Per-request and explicit step bounds remain enforced. Foundation-Sec and VulnLLM retain their 16,384-token contexts and 4,096→8,192 output budgets. Ollama decides whether the models fit in memory together; concurrent dispatch does not prove simultaneous inference. The legacy audit and advisory chat commands retain their two original specialist adapters.
 
 Run the owned SQL-injection and object-ownership controls with:
 

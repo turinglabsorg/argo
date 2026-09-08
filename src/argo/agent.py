@@ -216,6 +216,7 @@ def run_agent(
         raise ValueError("Step budget must be between 1 and 40")
     project = project_directory(project) if project is not None else None
     test_database = database_mode(test_database)
+    connected_audit = intelligence_mode == "connected" and re.search(r"audit|pentest|secur|sicurezz|vulnerab|cve|exploit|analizz|analy", task, re.I)
     if project and seed:
         raise ValueError("A mounted project cannot be overwritten with a saved workspace seed")
     seed = validate_files(clean(seed or {}))
@@ -226,7 +227,7 @@ def run_agent(
     policy["finding_reviews"] = {"model": QWEN, "required_phases": ["finding", "fix"]}
     store = EvidenceStore(state_root, "isolated-agent", hashlib.sha256(json.dumps(policy, sort_keys=True).encode()).hexdigest(), 32)
     started = time.monotonic()
-    deadline = 1800
+    deadline = 14400 if connected_audit or set(required_reviews) & {ANALYST, QWEN} else 1800
     status, summary, gaps, events, final_files = "failed", "", [], [], dict(seed)
     snapshot = None
     validation_result = None
@@ -352,7 +353,7 @@ def run_agent(
                 progress("CVE lookup complete", text=f"{len(cve_catalog['candidates'])} advisory candidates · {cve_catalog['packages_queried']} package versions checked", provisional=False)
                 return cve_catalog
 
-            if intelligence_mode == "connected" and re.search(r"audit|pentest|secur|sicurezz|vulnerab|cve|exploit|analizz|analy", task, re.I):
+            if connected_audit:
                 ensure_cves(0)
             base_steps = min(256, 24 + len(seed)) if project else 24
             step = -1

@@ -81,3 +81,38 @@ def test_long_foundation_review_completes_through_controller_and_saves_evidence(
     saved = read_evidence(path, report['tools'][0]['evidence_id'])['data']['result']
     assert saved['model'] == ANALYST and saved['summary'] == 'Reviewed source'
     assert verify(path)['status'] == 'verified'
+
+
+@pytest.mark.live
+@pytest.mark.parametrize('required,elapsed,accepted,mode', [
+    ((ANALYST,), 2200, True, 'offline'),
+    ((QWEN,), 2200, True, 'offline'),
+    ((QWEN,), 14401, False, 'offline'),
+    ((), 2200, False, 'offline'),
+    ((), 2200, True, 'connected'),
+    ((), 14401, False, 'connected'),
+])
+def test_required_review_budget_covers_source_reading_before_inference(tmp_path, monkeypatch, required, elapsed, accepted, mode):
+    clock = SimpleNamespace(value=10.0)
+    monkeypatch.setattr('argo.agent.time', SimpleNamespace(monotonic=lambda: clock.value))
+
+    def progress(event):
+        if event['stage'] == 'workspace.read':
+            clock.value = 10.0 + elapsed
+
+    actions = [{'action': 'workspace.read', 'parameters': {'path': 'app.py'}}]
+    if required:
+        actions.append({'action': 'security.review', 'parameters': {
+            'model': 'qwen' if required[0] == QWEN else 'foundation', 'paths': ['app.py'],
+        }})
+    actions.append({'action': 'finish', 'parameters': {'summary': 'The owned source was read and reviewed.'}})
+    with endpoint('ollama', replies=[{'summary': 'Reviewed', 'suspected_findings': []}]) as (local, records), endpoint('openai', replies=actions) as (coding, _):
+        monkeypatch.setattr('argo.agent_models.ENDPOINT', local.base_url)
+        result = run_agent('Audit source after a long initial inventory', tmp_path, seed={'app.py': 'value = 1'},
+                           coding=coding, use_mcp=False, required_reviews=required, max_steps=4, on_progress=progress,
+                           intelligence_mode=mode)
+    assert result['status'] == ('complete' if accepted else 'failed')
+    if not accepted:
+        assert result['summary'] == 'Agent task deadline exceeded'
+    assert len([record for record in records if record['path'] == '/api/chat']) == int(accepted and bool(required))
+    assert verify(Path(result['report']).parent)['status'] == 'verified'
