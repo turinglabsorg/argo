@@ -294,6 +294,10 @@ def test_coder_line_arrays_preserve_executable_multiline_source():
 @pytest.mark.parametrize('body,expected', [
     ("describe('audit',()=>{it('anonymous',()=>assert.equal(1,2));it('user',()=>assert.equal(1,2));});", 'assertion_failed'),
     ("test('parent',async t=>{await t.test('child',()=>assert.equal(1,2));});", 'assertion_failed'),
+    ("test('wrapped exception',()=>assert.doesNotThrow(()=>{throw new RangeError('invalid input');}));", 'assertion_failed'),
+    ("test('wrapped rejection',async()=>assert.doesNotReject(async()=>{throw new TypeError('invalid input');}));", 'assertion_failed'),
+    ("test('runtime with assertion cause',()=>{try{assert.equal(1,2);}catch(cause){throw new Error('fixture failure',{cause});}});", 'inconclusive'),
+    ("test('wrapped exception',()=>assert.doesNotThrow(()=>{throw new RangeError('invalid input');}));test('runtime',()=>{throw new Error('fixture failure');});", 'inconclusive'),
     ("describe('audit',()=>{it('assertion',()=>assert.equal(1,2));it('runtime',()=>{throw new Error('fixture unavailable');});});", 'inconclusive'),
     ("describe('audit',()=>{before(()=>{throw new Error('setup');});it('unreached',()=>assert.equal(1,2));});", 'inconclusive'),
 ])

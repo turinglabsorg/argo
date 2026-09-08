@@ -22,6 +22,16 @@ EXCLUDED = {"__pycache__", "node_modules", "vendor", "dist", "build", "target", 
 MANIFESTS = {"package.json", "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml", "bun.lock", "requirements.txt", "pyproject.toml", "uv.lock", "poetry.lock", "Dockerfile", "docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"}
 
 
+class NodeTapLoader(yaml.SafeLoader):
+    def construct_mapping(self, node, deep=False):
+        self.flatten_mapping(node)
+        result = {}
+        # Node can flatten an assertion's actual Error into duplicate diagnostic keys.
+        for key, value in self.construct_pairs(node, deep=deep):
+            result.setdefault(key, value)
+        return result
+
+
 def parts(name):
     path = PurePosixPath(name)
     if (
@@ -237,7 +247,7 @@ def finding_test(path):
                 outcome = "passed"
             elif result["exit_code"] == 1 and counts.get("fail", 0) > 0:
                 try:
-                    diagnostics = [yaml.safe_load(textwrap.dedent(body)) for _, body in re.findall(r"(?m)^([ \t]+)---\n([\s\S]*?)^\1\.\.\.[ \t]*$", result["stdout"])]
+                    diagnostics = [yaml.load(textwrap.dedent(body), Loader=NodeTapLoader) for _, body in re.findall(r"(?m)^([ \t]+)---\n([\s\S]*?)^\1\.\.\.[ \t]*$", result["stdout"])]
                     failures = [item for item in diagnostics if isinstance(item, dict) and "failureType" in item]
                     assertions = [item for item in failures if item.get("type") == "test" and item.get("failureType") == "testCodeFailure" and item.get("code") == "ERR_ASSERTION" and item.get("name") == "AssertionError"]
                     parents = [item for item in failures if item.get("type") in {"suite", "test"} and item.get("failureType") == "subtestsFailed" and item.get("code") == "ERR_TEST_FAILURE"]

@@ -57,7 +57,11 @@ that specific claim. Inspect outputs and code before findings.verdict. Never int
 timeouts, missing dependencies or skipped tests as reproduction or refutation. They are inconclusive.
 findings.test executes the files itself and records hashes and outcomes; do not substitute arbitrary test IDs
 from python.tests/node.tests/security.validation. findings.verdict requires that finding's latest unchanged
-test evidence. It records a model interpretation of local observations, not independent confirmation or a
+test evidence. Copy latest_test_evidence_id from controller status exactly; never guess an evidence hash.
+Controller verdict guidance lists deterministic eligibility, not a conclusion or Qwen approval. When only
+inconclusive is allowed, inspect the failure and repair a real test/environment problem before rerunning,
+or record the blocker. Repeating a rejected verdict cannot change the test evidence.
+It records a model interpretation of local observations, not independent confirmation or a
 claim about deployment. Do not mark a bug fixed just because it no longer reproduces after changing source.
 For an actual blocker use findings.defer with the observed evidence, reason and missing prerequisite.
 This is incomplete coverage, never a clean result. Pending or stale findings block finish; resolve every
@@ -93,23 +97,59 @@ def queue(findings, offset=0, limit=12):
     ordered = sorted(findings, key=lambda item: state(item) in RESOLVED)
     return {
         "total": len(findings), "counts": dict(Counter(state(item) for item in findings)),
-        "items": [{"id": item["id"], "path": item["asset"], "title": item["title"], "state": state(item)} for item in ordered[offset:offset + limit]],
+        "items": [{"id": item["id"], "path": item["asset"], "title": item["title"], "state": state(item), "latest_test_evidence_id": (item.get("verification") or {}).get("test_evidence_id")} for item in ordered[offset:offset + limit]],
         "next_offset": offset + limit if offset + limit < len(findings) else None,
     }
 
 
-def next_verification(findings):
-    item = next((item for item in findings if state(item) not in RESOLVED), None)
+def next_verification(findings, test_results=None):
+    ordered = sorted(findings, key=lambda item: state(item) != "tested")
+    item = next((item for item in ordered if state(item) not in RESOLVED), None)
     if item is None:
         return None
     node = item["asset"].endswith((".js", ".cjs", ".mjs", ".ts", ".tsx", "package.json", "package-lock.json", "yarn.lock"))
     tests = {role: "tests/argo-security/" + (f"{item['id']}_{role}.test.cjs" if node else f"test_{item['id']}_{role}.py") for role in ROLES}
-    return {
+    result = {
         "finding_id": item["id"], "asset": item["asset"], "hypothesis": item["explanation"],
         "state": state(item), "suggested_test_files": tests,
         "latest_test_evidence_id": (item.get("verification") or {}).get("test_evidence_id"),
         "required_sequence": "Create the three separate regression/control files with code.edit; execute findings.test; inspect results and record findings.verdict. Use findings.defer only for an observed blocker.",
     }
+    latest = (test_results or {}).get(result["latest_test_evidence_id"])
+    if latest is not None:
+        result["runtime"] = verdict_guidance(item, latest)
+    return result
+
+
+def verdict_guidance(item, result=None):
+    verification = item.get("verification") or {}
+    guidance = {
+        "finding_id": item["id"], "state": state(item),
+        "latest_test_evidence_id": verification.get("test_evidence_id"),
+        "allowed_interpretations": [],
+        "next_step": "Run findings.test for this finding using current source and three separate test roles; do not invent or borrow an evidence ID.",
+    }
+    if result is None:
+        return guidance
+    guidance["outcomes"] = {role: result["cases"][role]["outcome"] for role in ROLES}
+    guidance["test_arguments"] = {key: result[key] for key in ("finding_id", "hypothesis", "expected_secure_behavior", "source_paths", "tests") if key in result}
+    for interpretation in ("reproduced", "refuted", "fixed", "inconclusive"):
+        try:
+            verdict(item, {"finding_id": item["id"], "test_evidence_id": verification.get("test_evidence_id"), "interpretation": interpretation, "explanation": "Controller eligibility check"}, result)
+        except ValueError:
+            continue
+        guidance["allowed_interpretations"].append(interpretation)
+    if guidance["allowed_interpretations"] == ["inconclusive"]:
+        guidance["next_step"] = "Inspect the inconclusive or failing control diagnostics. Repair the actual test/environment issue and rerun findings.test, or record inconclusive with the latest evidence ID. Preserve locked tests and security assertions; setup/runtime failures alone do not prove a vulnerability."
+    elif guidance["allowed_interpretations"]:
+        guidance["next_step"] = "Inspect the assertions and actual application behavior, then use the exact latest_test_evidence_id with an eligible interpretation. Eligibility is not proof; conclusive verdicts still require bound Qwen approval."
+    return guidance
+
+
+def test_observation(result):
+    visible = {key: value for key, value in result.items() if key not in {"source_hashes", "support_hashes", "cases"}}
+    visible["cases"] = {role: {key: value for key, value in case.items() if key != "source_hashes"} for role, case in result["cases"].items()}
+    return visible
 
 
 def check_verification_edit(findings, paths):
