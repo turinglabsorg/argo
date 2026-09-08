@@ -354,10 +354,11 @@ def run_agent(
 
             if intelligence_mode == "connected" and re.search(r"audit|pentest|secur|sicurezz|vulnerab|cve|exploit|analizz|analy", task, re.I):
                 ensure_cves(0)
+            base_steps = min(256, 24 + len(seed)) if project else 24
             step = -1
-            while step + 1 < (max_steps if max_steps is not None else min(1024, 24 + 8 * len(findings))):
+            while step + 1 < (max_steps if max_steps is not None else min(1024, base_steps + 8 * len(findings))):
                 step += 1
-                step_limit = max_steps if max_steps is not None else min(1024, 24 + 8 * len(findings))
+                step_limit = max_steps if max_steps is not None else min(1024, base_steps + 8 * len(findings))
                 check()
                 progress(f"step {step + 1}/{step_limit}")
                 context = {

@@ -4,8 +4,7 @@ import json
 import httpx
 from jsonschema import ValidationError
 
-from argo.agent_models import QWEN, local_model_error, review_limits, review_response
-from argo.context_budget import estimate_tokens
+from argo.agent_models import QWEN, local_model_error, review_response
 from argo.contracts import FindingReview
 from argo.evidence import clean, read_evidence
 from argo.finding_validation import invalidate, state
@@ -122,9 +121,6 @@ def ensure_review(item, arguments, test_result, workspace, evidence_path, record
     on_progress(status="Qwen · " + metadata["phase"] + " review", text=item["title"], provisional=True)
     messages = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": json.dumps(context)}]
     try:
-        limits = review_limits(QWEN)
-        if estimate_tokens(messages) + estimate_tokens(SCHEMA) + limits.output_budgets[-1] + 1024 > limits.context_window:
-            raise ValueError("Mandatory review exceeds Qwen's context; narrow the finding with complete relevant source/tests or record a blocker")
         result = {"model": QWEN, "status": "complete", **review_response(
             QWEN, messages, SCHEMA, check,
             on_text=lambda text: on_progress(text=text, provisional=True),

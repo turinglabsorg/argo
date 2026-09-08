@@ -2,6 +2,7 @@ import ast
 import asyncio
 import hashlib
 import json
+import math
 import re
 import sys
 import time
@@ -45,6 +46,20 @@ def review_limits(model):
     if model == QWEN:
         return ReviewLimits(32768, (8192, 16384), 3600, 600, 0.6, 8 * 1024**2)
     return ReviewLimits()
+
+
+def review_context_window(model, messages, schema, metadata):
+    limits = review_limits(model)
+    if model != QWEN:
+        return limits.context_window
+    info = metadata.get("model_info", {})
+    architecture = info.get("general.architecture") if isinstance(info, dict) else None
+    advertised = info.get(f"{architecture}.context_length") if architecture else None
+    capacity = advertised if type(advertised) is int and 1024 <= advertised <= 100_000_000 else limits.context_window
+    required = math.ceil((estimate_tokens(messages) + estimate_tokens(schema) + limits.output_budgets[-1] + 1024) / 0.9)
+    if required > capacity:
+        raise LocalModelError("context", "Complete review exceeds Qwen's advertised context; narrow the finding with complete relevant source/tests or record a blocker.")
+    return min(capacity, max(limits.context_window, math.ceil(required / 32768) * 32768))
 
 
 class LocalModelError(RuntimeError):
@@ -120,6 +135,7 @@ async def local_structured(model, messages, schema, check, tokens, on_text, on_r
             if not isinstance(metadata, dict) or not isinstance(metadata.get("capabilities", []), list):
                 raise LocalModelError("metadata", "Ollama returned invalid model capabilities.")
             payload["think"] = "thinking" in metadata.get("capabilities", [])
+            payload["options"]["num_ctx"] = review_context_window(model, payload["messages"], schema, metadata)
         request = client.build_request("POST", ENDPOINT + "/api/chat", json=payload)
         response = await wait_local(client.send(request, stream=True), check, started, limits.deadline)
         try:

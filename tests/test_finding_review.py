@@ -76,6 +76,37 @@ def test_bound_review_reuse_and_stale_source_denial(review_case, monkeypatch):
         assert len(records) == 1
 
 
+@pytest.mark.parametrize("capacity,accepted", [(32768, False), (262144, True)])
+def test_large_manifest_review_uses_advertised_context_without_omission(review_case, monkeypatch, capacity, accepted):
+    snapshot, store, records, _, run = review_case
+    lockfile = "# Resolved dependency metadata\n" * 6200
+    snapshot.manifests["yarn.lock"] = lockfile
+    snapshot.result["source_hashes"] = hashes({**snapshot.files, **snapshot.manifests})
+    apply_result(snapshot.item, "findings.test", snapshot.result, "b" * 64)
+    metadata = {"capabilities": ["completion", "thinking"], "model_info": {
+        "general.architecture": "qwen35", "qwen35.context_length": capacity,
+    }}
+    with endpoint("ollama", replies=lambda _: ASSESSMENT, metadata=metadata) as (local, requests):
+        monkeypatch.setattr("argo.agent_models.ENDPOINT", local.base_url)
+        if accepted:
+            run()
+        else:
+            with pytest.raises(ValueError, match="did not approve"):
+                run()
+    chats = [r["body"] for r in requests if r["path"] == "/api/chat"]
+    saved = read_evidence(store.path, records[0])["data"]["result"]
+    assert saved["review_context"]["manifests"]["yarn.lock"] == lockfile
+    if accepted:
+        assert saved["status"] == "complete"
+        assert len(chats) == 1
+        assert 32768 < chats[0]["options"]["num_ctx"] < capacity
+        assert json.loads(chats[0]["messages"][-1]["content"])["manifests"]["yarn.lock"] == lockfile
+    else:
+        assert not chats
+        assert saved["status"] == "failed"
+        assert "advertised context" in saved["error"]
+
+
 @pytest.mark.parametrize("change", ["test_id", "claim", "source"])
 def test_review_binding_never_reuses_a_different_snapshot(review_case, monkeypatch, change):
     snapshot, _, records, _, run = review_case

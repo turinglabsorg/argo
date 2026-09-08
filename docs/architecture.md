@@ -109,7 +109,7 @@ Business-logic/API testing needs more than scanners: operator-provided API schem
 
 ## Local inference
 
-Use native Ollama for Apple Metal acceleration. Foundation-Sec and VulnLLM use 16,384-token contexts; the experimental Qwen reviewer uses 32,768. Concurrent operation was measured on the 64 GiB Mac; other hosts may queue requests. These local budgets are independent of API-discovered coding-provider limits.
+Use native Ollama for Apple Metal acceleration. Foundation-Sec and VulnLLM use 16,384-token contexts; the experimental Qwen reviewer starts at 32,768 and increases its allocation for complete evidence, bounded by the architecture-specific capacity reported by Ollama. Concurrent operation was measured at the original 32,768 allocation on the 64 GiB Mac; larger contexts and other hosts may queue requests. These local budgets are independent of API-discovered coding-provider limits.
 
 Foundation-Sec-8B-Reasoning is the default analyst and VulnLLM-R-7B is the source-review specialist. They and the experimental Qwen3.8 27B reviewer have pinned Q4_K_M artifacts. No silent provider substitution occurs. Integration smoke checks do not establish broad security accuracy.
 

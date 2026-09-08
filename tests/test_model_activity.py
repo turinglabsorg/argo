@@ -16,7 +16,8 @@ from argo.tui import COMMANDS, LOGO, ArgoApp
 @pytest.mark.parametrize('model', [ANALYST, REVIEWER, QWEN])
 def test_local_review_streams_user_facing_fields_and_batches_long_source(monkeypatch, model):
     result = {'summary': 'Review complete', 'suspected_findings': [{'path': 'app.py', 'issue': 'Unbound SQL value', 'remediation': 'Bind query parameters'}]}
-    with endpoint('ollama', replies=[result] * 10) as (profile, records):
+    metadata = {'capabilities': ['completion', 'thinking'], 'model_info': {'general.architecture': 'qwen35', 'qwen35.context_length': 262144}} if model == QWEN else None
+    with endpoint('ollama', replies=[result] * 10, metadata=metadata) as (profile, records):
         monkeypatch.setattr('argo.agent_models.ENDPOINT', profile.base_url)
         updates = []
         source = 'value = 1\n' * 6000
