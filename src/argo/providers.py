@@ -434,7 +434,7 @@ def retry_wait(seconds, check):
 def retry_reason(error):
     if isinstance(error, ProviderTransientError):
         return str(error)
-    if isinstance(error, ProviderHTTPError) and error.status in {408, 500, 502, 503, 504, 529}:
+    if isinstance(error, ProviderHTTPError) and error.status in {408, 500, 502, 503, 504, 522, 524, 529}:
         return "Temporary provider failure (HTTP " + str(error.status) + ")"
     if isinstance(error, ProviderResponseError) and error.code == "incomplete":
         return "Provider stream ended before completion"

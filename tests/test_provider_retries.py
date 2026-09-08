@@ -119,14 +119,28 @@ def test_five_automatic_retries_resume_identical_generation(monkeypatch, protoco
     assert "private provider details" not in str(progress)
 
 
-def test_sixth_failure_stops_and_reports_exhaustion(monkeypatch):
+@pytest.mark.parametrize("failure,status", [("stream", 503), ("http", 522), ("error_event", 524)])
+def test_sixth_failure_stops_and_reports_exhaustion(monkeypatch, failure, status):
     immediate_retries(monkeypatch)
     events = []
-    with flaky_endpoint(failure_calls=range(1, 20)) as (profile, records):
+    with flaky_endpoint(failure_calls=range(1, 20), failure=failure, error_status=status) as (profile, records):
         with pytest.raises(ProviderRetryExhausted, match="after 5 automatic retries"):
             generate(profile, [], SCHEMA, on_retry=events.append)
     assert len(records) == 6
     assert events[-1]["phase"] == "exhausted" and events[-1]["retry"] == 5
+
+
+@pytest.mark.parametrize("status", [522, 524])
+@pytest.mark.parametrize("failure", ["http", "error_event"])
+def test_gateway_timeouts_retry_identical_generation(monkeypatch, status, failure):
+    immediate_retries(monkeypatch)
+    events = []
+    with flaky_endpoint(failure_calls=[1], failure=failure, error_status=status) as (profile, records):
+        assert generate(profile, [{"role": "user", "content": "Original task"}], SCHEMA, on_retry=events.append) == {"ok": True}
+    assert len(records) == 2 and records[0] == records[1]
+    assert events[0]["reason"] == f"Temporary provider failure (HTTP {status})"
+    assert events[-1]["phase"] == "recovered"
+    assert "private provider details" not in str(events)
 
 
 @pytest.mark.parametrize('kind', ['overloaded_error', 'api_error'])
@@ -217,7 +231,8 @@ def test_retry_boundary_includes_real_credential_child(monkeypatch, tmp_path):
 
 
 @pytest.mark.live
-def test_retry_after_test_completion_keeps_same_run_without_replaying_tools(tmp_path, monkeypatch):
+@pytest.mark.parametrize("failure,status", [("stream", 503), ("http", 522), ("error_event", 524)])
+def test_retry_after_test_completion_keeps_same_run_without_replaying_tools(tmp_path, monkeypatch, failure, status):
     immediate_retries(monkeypatch)
     replies = [
         {"action": "code.edit", "parameters": {"instruction": "Create addition and regression", "paths": ["add.py", "test_add.py"]}},
@@ -226,7 +241,7 @@ def test_retry_after_test_completion_keeps_same_run_without_replaying_tools(tmp_
         {"action": "finish", "parameters": {"summary": "Completed once after automatic provider recovery"}},
     ]
     progress = []
-    with flaky_endpoint(failure_calls=range(4, 9), replies=replies) as (profile, records):
+    with flaky_endpoint(failure_calls=range(4, 9), replies=replies, failure=failure, error_status=status) as (profile, records):
         result = run_agent("Create and test addition", tmp_path, coding=profile, use_mcp=False, max_steps=3, on_progress=progress.append)
     assert result["status"] == "complete", result
     path = Path(result["report"]).parent
