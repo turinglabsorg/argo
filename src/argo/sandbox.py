@@ -15,6 +15,10 @@ from argo.scanners import finding
 DATA = Path(__file__).parent / "data"
 
 
+class AdapterTimeoutError(TimeoutError):
+    pass
+
+
 def command(arguments, timeout, check, stdin=None):
     process = subprocess.Popen(
         arguments,
@@ -43,7 +47,7 @@ def command(arguments, timeout, check, stdin=None):
         while selector.get_map():
             check()
             if time.monotonic() > deadline:
-                raise TimeoutError("Adapter deadline exceeded")
+                raise AdapterTimeoutError("Adapter deadline exceeded")
             for key, _ in selector.select(0.1):
                 block = os.read(key.fileobj.fileno(), 65536)
                 if not block:

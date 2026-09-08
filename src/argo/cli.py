@@ -39,7 +39,7 @@ def main():
     sub.add_argument("--test-database", choices=["off", "mongodb"], default="off", help="Start a temporary database on isolated worker loopback")
     sub.add_argument("--intelligence", choices=["offline", "connected"], help="Override saved CVE intelligence mode for this task")
     sub.add_argument("--mcp-profile", type=Path)
-    sub.add_argument("--max-steps", type=int, default=24)
+    sub.add_argument("--max-steps", type=int, default=None, help="Explicit action cap (1-40); otherwise includes a bounded per-finding verification budget")
     sub.add_argument("--planner", choices=MODELS, help="Explicit local coordinator override; otherwise use the TUI-selected coding profile")
     commands.add_parser("mcp-tools").add_argument("--profile", type=Path)
     init = commands.add_parser("init")

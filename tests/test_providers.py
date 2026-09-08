@@ -21,7 +21,7 @@ SCHEMA = {"type": "object", "properties": {"ok": {"const": True}}, "required": [
 
 
 @contextmanager
-def endpoint(protocol, replies=None, status=200, json_response=False, reasoning_tokens=0, metadata=None, error=None, chunks=None):
+def endpoint(protocol, replies=None, status=200, json_response=False, reasoning_tokens=0, metadata=None, error=None, chunks=None, usage=None):
     records = []
     iterator = iter(replies) if replies is not None and not callable(replies) else None
 
@@ -55,6 +55,8 @@ def endpoint(protocol, replies=None, status=200, json_response=False, reasoning_
                 return
             if json_response:
                 data = {"content": [{"type": "text", "text": content}], "stop_reason": "end_turn"} if protocol == "anthropic" else {"choices": [{"message": {"content": content}, "finish_reason": "stop"}]}
+                if usage is not None:
+                    data["usage"] = usage
                 self.wfile.write(json.dumps(data).encode())
             elif protocol == "ollama":
                 if chunks is not None:
@@ -72,6 +74,8 @@ def endpoint(protocol, replies=None, status=200, json_response=False, reasoning_
                     events = [{"choices": [{"delta": {"content": content[:5]}, "finish_reason": None}]}, {"choices": [{"delta": {"content": content[5:]}, "finish_reason": finish}]}]
                 else:
                     events = [{"type": "message_start", "message": {"content": []}}, {"type": "content_block_start", "content_block": {"type": "text", "text": ""}}, {"type": "content_block_delta", "delta": {"type": "text_delta", "text": content[:5]}}, {"type": "content_block_delta", "delta": {"type": "text_delta", "text": content[5:]}}, {"type": "message_stop"}]
+                if usage is not None:
+                    events[-1]["usage"] = usage
                 for event in events:
                     self.wfile.write(("data: " + json.dumps(event) + "\n\n").encode())
                 if protocol == "openai":
@@ -174,7 +178,7 @@ def test_credential_worker_delivers_auth_without_returning_key(protocol):
         payload = {"profile": profile.model_dump(), "operation": "generate", "messages": [{"role": "user", "content": "JSON"}], "schema": SCHEMA}
         process = subprocess.run([sys.executable, "-I", "-m", "argo.provider_worker"], input=json.dumps(payload), text=True, capture_output=True, timeout=15, env={**os.environ, "ARGO_PROVIDER_KEY": "synthetic-fixture-key"})
         assert process.returncode == 0
-        assert json.loads(process.stdout) == {"result": {"ok": True}}
+        assert json.loads(process.stdout) == {"result": {"ok": True}, "usage": [{"response_complete": True}]}
         assert "synthetic-fixture-key" not in process.stdout + process.stderr
         headers = records[-1]["headers"]
         assert headers.get("x-api-key", headers.get("Authorization")) in {"synthetic-fixture-key", "Bearer synthetic-fixture-key"}

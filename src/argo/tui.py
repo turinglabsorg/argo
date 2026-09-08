@@ -33,8 +33,9 @@ from argo.context_budget import ModelLimits
 from argo.contracts import Actions, Engagement, Scope
 from argo.controller import Cancelled, run
 from argo.evidence import clean, read_evidence, read_state
+from argo.finding_validation import description, state
 from argo.mcp import default_profile, load_profile
-from argo.model_activity import analysis_text
+from argo.model_activity import review_text
 from argo.model_dialog import ModelDialog
 from argo.providers import SETTINGS, load_settings, model_limits
 from argo.scope import authorize, check_authorization, digest, load, normalize, save
@@ -462,7 +463,7 @@ class ArgoApp(App):
         self.ui("#model-roster", Static).update(display_text("  " + "  /  ".join(self.model_label(model) for _, model, _ in self.model_roles())))
 
     def model_roles(self):
-        return [("coding", self.coding.model, "Coding & coordination"), ("foundation", ANALYST, "Security analysis"), ("vulnllm", REVIEWER, "Vulnerability review"), ("qwen", QWEN, "Deep review · experimental")]
+        return [("coding", self.coding.model, "Coding & coordination"), ("foundation", ANALYST, "Security analysis"), ("vulnllm", REVIEWER, "Vulnerability review"), ("qwen", QWEN, "Finding & fix review · experimental")]
 
     def model_label(self, model):
         return {ANALYST: "Foundation-Sec 8B", REVIEWER: "VulnLLM-R 7B", QWEN: "Qwen3.8 27B", "meta/muse-spark-1.3-contributor": "Muse Spark 1.3 Contributor"}.get(model, model.rsplit("/", 1)[-1])
@@ -701,8 +702,29 @@ class ArgoApp(App):
     def progress(self, data):
         self.current_run = self.state_root / data["run_id"]
         if "findings" in data and isinstance(data["findings"], list):
-            self.report_data = {"run_id": data["run_id"], "findings": data["findings"]}
+            self.report_data = {"kind": data.get("kind", (self.report_data or {}).get("kind")), "run_id": data["run_id"], "findings": data["findings"]}
             self.refresh_findings()
+        if data.get("provider_retry"):
+            retry = data["provider_retry"]
+            count = f"{retry['retry']}/{retry['max_retries']}"
+            phase = retry["phase"]
+            model = data["model"]
+            operation = retry["operation"]
+            if phase == "waiting":
+                message = f"{retry['reason']} · retry {count} in {retry['delay_seconds']}s"
+            elif phase == "retrying":
+                message = f"Retry {count} · resuming {operation}"
+            elif phase == "recovered":
+                message = f"Connection recovered after {retry['retry']} retries · continuing {operation}"
+            else:
+                message = f"Stopped after {retry['max_retries']} retries · completed work retained"
+            self.set_status(message)
+            self.active_model = model
+            self.model_activity.setdefault(model, {}).update(stage=operation, state="Error" if phase == "exhausted" else ("Retrying" if phase in {"waiting", "retrying"} else "Working"))
+            self.model_activity[model].pop("waiting", None)
+            self.render_model_output((model, "provider_retry"), self.model_label(model) + " · connection", message)
+            self.refresh_models()
+            return
         self.set_status(data["stage"].capitalize() + "  ·  " + data.get("model", data["run_id"][:12]))
         if data.get("compact", {}).get("phase") == "complete":
             compact = data["compact"]
@@ -927,7 +949,7 @@ class ArgoApp(App):
                 *[
                     Text(display_text(str(value)))
                     for value in (
-                        item["status"],
+                        state(item) if state(item) != "pending" else item["status"],
                         item["severity"],
                         item["title"],
                         item["asset"] + (":" + str(item["line"]) if item.get("line") else ""),
@@ -945,7 +967,7 @@ class ArgoApp(App):
         if width < 50 or len(table.columns) != 4:
             return
         location = min(28, width // 3)
-        widths = [10, 8, max(12, width - location - 27), location]
+        widths = [12, 8, max(12, width - location - 29), location]
         changed = False
         for column, target in zip(table.columns.values(), widths):
             if column.width != target or column.auto_width:
@@ -975,6 +997,8 @@ class ArgoApp(App):
             )
             if item.get("validation"):
                 content += "\n\nValidation\n" + item["validation"]
+            if self.report_data.get("kind") == "isolated_agent" and item.get("verification"):
+                content += "\n\n" + description(item)
             self.ui("#finding-detail", TextArea).load_text(display_text(content))
 
     def refresh_runs(self):
@@ -1023,7 +1047,7 @@ class ArgoApp(App):
                 if analysis.get("model"):
                     activity = self.model_activity.setdefault(analysis["model"], {})
                     failed = analysis.get("status") == "failed"
-                    activity.update(state="Error" if failed else "Saved response", stage="Security analysis", text=analysis.get("error", "") if failed else analysis_text(json.dumps(analysis)))
+                    activity.update(state="Error" if failed else "Saved response", stage="Security analysis", text=analysis.get("error", "") if failed else review_text(analysis))
             self.refresh_models()
             self.report_data = report
             self.current_run = path

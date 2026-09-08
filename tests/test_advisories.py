@@ -230,13 +230,15 @@ def test_coordinator_cve_lookup_review_runtime_evidence_and_saved_findings(tmp_p
             if record.get("kind") == "agent_tool" and record["data"]["action"]["tool"] == "node.tests":
                 test_evidence = path.stem
 
-    with intelligence_server(monkeypatch), endpoint("ollama", replies=assessment) as (local, _), endpoint("openai", replies=coding_reply) as (coding, _):
+    with intelligence_server(monkeypatch), endpoint("ollama", replies=assessment) as (local, _), endpoint("openai", replies=coding_reply, metadata={"context_length": 131072}) as (coding, _):
         monkeypatch.setattr("argo.agent_models.ENDPOINT", local.base_url)
         result = run_agent("Audit this Node project and check CVE applicability", tmp_path / "runs", seed={"package-lock.json": LOCK, "auth.cjs": SOURCE, "tests/argo-security/controls.test.cjs": "const test = require('node:test'); const assert = require('node:assert/strict'); test('owned negative control', () => assert.equal(1,1));"}, coding=coding, use_mcp=False, intelligence_mode="connected", on_progress=progress, max_steps=5)
     path = Path(result["report"]).parent
     report = json.loads((path / "report.json").read_text())
     candidate = next(f for f in report["findings"] if f["rule"] == "agent.cve")
-    assert report["status"] == "complete"
+    assert report["status"] == "incomplete"
+    assert candidate["verification"]["state"] == "pending"
+    assert any("Runtime verification unresolved" in gap for gap in report["coverage_gaps"])
     assert candidate["status"] == "suspected" and len(candidate["assessments"]) == 3
     assert "Runtime evidence attached" in candidate["validation"]
     assert {r["model"] for r in candidate["assessments"]} == set(SPECIALISTS.values())

@@ -82,6 +82,44 @@ class ApplicabilityReview(Contract):
     evidence_id: str
 
 
+class FindingReview(Contract):
+    model: str
+    phase: Literal["finding", "fix"]
+    proposed_verdict: Literal["reproduced", "refuted", "fixed"]
+    status: Literal["complete", "failed"]
+    decision: Literal["agree", "disagree", "insufficient_context"]
+    summary: str
+    evidence_id: str
+    test_evidence_id: str
+    context_sha256: str
+    test_assessment: str = ""
+    remaining_concerns: list[str] = []
+
+
+class FindingReproduction(Contract):
+    test_evidence_id: str
+    verdict_evidence_id: str
+    source_hashes: dict[str, str]
+    test_hashes: dict[str, str]
+    support_hashes: dict[str, str] = {}
+    source_paths: list[str]
+    tests: dict[str, str] = {}
+
+
+class FindingVerification(Contract):
+    state: Literal["pending", "tested", "reproduced", "refuted", "fixed", "inconclusive", "stale"] = "pending"
+    explanation: str = ""
+    evidence_ids: list[str] = []
+    test_evidence_id: str | None = None
+    source_hashes: dict[str, str] = {}
+    test_hashes: dict[str, str] = {}
+    source_paths: list[str] = []
+    tests: dict[str, str] = {}
+    support_hashes: dict[str, str] = {}
+    reproduction: FindingReproduction | None = None
+    reviews: list[FindingReview] = []
+
+
 class Finding(Contract):
     id: str
     asset: str
@@ -98,6 +136,7 @@ class Finding(Contract):
     validation: str | None = None
     advisory_ids: list[str] = []
     assessments: list[ApplicabilityReview] = []
+    verification: FindingVerification = Field(default_factory=FindingVerification)
 
 
 class Package(Contract):

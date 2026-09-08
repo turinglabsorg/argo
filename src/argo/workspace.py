@@ -99,6 +99,7 @@ class Workspace:
         self.database_name = self.name + "-mongodb"
         self.database_started = False
         self.database = None
+        self.database_resets = 0
 
     def __enter__(self):
         try:
@@ -130,6 +131,15 @@ class Workspace:
             raise RuntimeError("Cannot inspect worker")
         return json.loads(output)[0]
 
+    def reset_test_database(self):
+        if not self.active or not self.database_started or self.test_database != "mongodb":
+            raise ValueError("Reset requires the operator-selected isolated MongoDB test fixture")
+        self.check()
+        remove(self.database_name)
+        self.database = start_mongodb(self.inspect()["Id"], self.database_name, self.check)
+        self.database_resets += 1
+        return {**self.database, "reset_count": self.database_resets, "state": "empty", "scope": "Only the owned disposable test database was restarted; project files were preserved."}
+
     def call(self, action, **arguments):
         if not self.active:
             raise RuntimeError("Workspace is closed")
@@ -141,7 +151,7 @@ class Workspace:
             environment = ["--env", "ARGO_TEST_MONGODB_URI=" + MONGODB_URI] if self.database else []
             code, output, _ = command(
                 ["docker", "exec", "-i", *environment, self.name, "python", "-I", "/opt/argo/worker.py"],
-                60, self.check, json.dumps({"action": action, **arguments}).encode(),
+                330 if action == "project_tests" else 60, self.check, json.dumps({"action": action, **arguments}).encode(),
             )
         except BaseException:
             self.close()

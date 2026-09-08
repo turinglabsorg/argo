@@ -78,7 +78,8 @@ def test_truncated_review_retries_only_inference_with_more_output(monkeypatch, m
     assert [body['options']['num_predict'] for body in requests] == [4096, 8192]
     assert all(body['think'] is False for body in requests)
     assert all(body['options']['temperature'] == temperature for body in requests)
-    assert requests[0]['messages'] == requests[1]['messages']
+    assert requests[0]['messages'][1:] == requests[1]['messages'][1:]
+    assert 'previous generation exhausted' in requests[1]['messages'][0]['content']
     assert any('retrying' in text for text in statuses)
 
 
@@ -160,7 +161,8 @@ def test_qwen_reserves_context_for_longer_reasoning_and_retries_only_truncation(
     requests = [r['body'] for r in records if r['path'] == '/api/chat']
     assert result['summary'] == 'Reviewed'
     assert [r['options']['num_predict'] for r in requests] == [8192, 16384]
-    assert requests[0]['messages'] == requests[1]['messages']
+    assert requests[0]['messages'][1:] == requests[1]['messages'][1:]
+    assert 'previous generation exhausted' in requests[1]['messages'][0]['content']
     assert any('16,384' in status for status in statuses)
 
 

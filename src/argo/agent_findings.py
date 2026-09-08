@@ -3,6 +3,8 @@ import json
 
 from argo.contracts import Finding
 from argo.evidence import clean, read_evidence
+from argo.finding_review import apply_review
+from argo.finding_validation import apply_result, selected_finding
 from argo.workspace import validate_path
 
 FINDING_SCHEMA = {
@@ -90,6 +92,9 @@ def merge_findings(existing, additional):
     for item in additional:
         if item["id"] in merged:
             item = {**item, "evidence_ids": list(dict.fromkeys([*merged[item["id"]]["evidence_ids"], *item["evidence_ids"]])), "assessments": merged[item["id"]].get("assessments", []) + item.get("assessments", [])}
+            item["verification"] = merged[item["id"]].get("verification", item.get("verification"))
+            if item["verification"].get("reviews") and any(item[key] != merged[item["id"]][key] for key in ("asset", "title", "explanation", "remediation")):
+                item["verification"] = {**item["verification"], "state": "stale", "explanation": "The reviewed claim changed. Retest and obtain a fresh Qwen review."}
             if item["rule"] == "agent.cve":
                 item["validation"] = merged[item["id"]]["validation"]
         merged[item["id"]] = item
@@ -121,12 +126,26 @@ def load_agent_findings(path, report):
         return report.get("findings", [])
     findings = []
     for event in report.get("tools", []):
-        if event.get("tool") not in {"security.review", "security.cves", "findings.record", "python.run"}:
+        tool = event.get("tool")
+        mutating = tool in {"code.edit", "python.run", "python.tests", "node.tests", "project.tests", "findings.test"}
+        if not mutating and tool not in {"security.review", "security.cves", "findings.record", "findings.verdict", "findings.defer"}:
             continue
         identity = event["evidence_id"]
         record = read_evidence(path, identity)
+        if record.get("kind") != "agent_tool":
+            continue
+        if mutating:
+            invalidated = record["data"].get("verification_invalidated")
+            for item in findings:
+                if (item.get("verification") or {}).get("test_evidence_id") and (invalidated is None or item["id"] in invalidated):
+                    explanation = "Recovered validation preceded a potentially mutating tool. Retest the current workspace." if invalidated is None else "Source or associated tests changed after validation. Run findings.test again."
+                    item["verification"].update(state="stale", explanation=explanation)
         if record.get("kind") == "agent_tool":
             findings = merge_findings(findings, tool_findings(record["data"], identity))
             if event.get("tool") == "security.review":
                 findings = apply_cve_reviews(findings, record["data"]["result"], identity)
+                apply_review(findings, record["data"]["result"], identity)
+            if event.get("tool") in {"findings.test", "findings.verdict", "findings.defer"}:
+                result = record["data"]["result"]
+                apply_result(selected_finding(findings, result["finding_id"]), event["tool"], result, identity)
     return findings

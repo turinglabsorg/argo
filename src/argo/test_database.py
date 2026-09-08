@@ -46,5 +46,5 @@ def start_mongodb(worker, name, check):
     code, _, _ = command(["docker", "exec", worker, "python", "-I", "-c", probe], 20, check)
     if code:
         raise RuntimeError("MongoDB test database did not become ready on worker loopback")
-    return {"kind": "mongodb", "image": MONGODB_IMAGE, "container": name, "uri": MONGODB_URI,
+    return {"kind": "mongodb", "image": MONGODB_IMAGE, "container": name, "container_id": detail["Id"], "uri": MONGODB_URI,
             "network": "worker loopback only", "persistent": False}

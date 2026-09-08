@@ -126,7 +126,9 @@ def test_parallel_review_saves_independent_evidence_and_coverage_gaps(tmp_path, 
     individual = [r for r in report['tools'] if r['tool'] == 'security.review']
     assert {r['model'] for r in individual} == set(SPECIALISTS.values())
     assert len(report['findings']) == (2 if failed else 3)
-    assert len(report['coverage_gaps']) == (1 if failed else 0)
+    assert len(report['coverage_gaps']) == (2 if failed else 1)
+    assert report['status'] == 'incomplete'
+    assert report['finding_verification']['counts'] == {'pending': 2 if failed else 3}
     assert all(f['status'] == 'suspected' for f in report['findings'])
     assert {f['evidence_ids'][0] for f in report['findings']} <= {r['evidence_id'] for r in individual}
     assert verify(path)['status'] == 'verified'

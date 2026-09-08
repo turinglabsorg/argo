@@ -4,7 +4,7 @@ Review code. Investigate security issues. Apply fixes and verify them.
 
 Argo is a terminal agent with specialist local security models and your choice of local or remote coding endpoint. It edits the project you open and executes Python and targeted Node.js security tests in Docker.
 
-Launch Argo from a project directory: that directory is mounted read/write, and edits immediately change its files. F2 or /model selects any model ID through an Ollama, OpenAI-compatible or Anthropic-compatible endpoint. The selected model coordinates tools and writes code. Optional local Foundation-Sec, VulnLLM and Qwen3.8 27B provide independent reviews, individually or in parallel.
+Launch Argo from a project directory: that directory is mounted read/write, and edits immediately change its files. F2 or /model selects any model ID through an Ollama, OpenAI-compatible or Anthropic-compatible endpoint. The selected model coordinates tools and writes code. Qwen3.8 27B reviews each conclusive finding and its fix automatically. Foundation-Sec and VulnLLM provide additional security opinions; all three can also review source individually or in parallel.
 
 Code executes in a non-root, offline container with only the selected project mounted. Provider credentials, the Docker socket and other host directories are not mounted. Files inside the selected project are accessible to its code. A separate immutable broker connects to configured remote MCP tools.
 
@@ -12,7 +12,7 @@ Code executes in a non-root, offline container with only the selected project mo
 
 ## Install
 
-Requirements: Python 3.12+, uv and Docker. Native Ollama is optional when using a remote coding endpoint.
+Requirements: Python 3.12+, uv and Docker. Native Ollama with `argo-qwen:27b` is required for conclusive finding verification and verified fixes, including with a remote coding endpoint. General coding tasks without findings can use a remote endpoint alone.
 
     uv sync --frozen --dev
     uv run python scripts/install_worker.py
@@ -23,7 +23,7 @@ Install the terminal command with frozen dependency versions:
     uv export --frozen --no-dev --no-emit-project --format requirements-txt --output-file /tmp/argo-constraints.txt >/dev/null
     uv tool install --editable . --python 3.12 --constraints /tmp/argo-constraints.txt
 
-For the optional local models, start Ollama and run:
+To install the local models, start Ollama and run:
 
     uv run python scripts/install_models.py
 
@@ -38,13 +38,13 @@ The installer verifies the pinned GGUF hashes and can reuse a verified source bl
 | argo-coder:30b-a3b | Qwen3-Coder-30B-A3B-Instruct, Unsloth Q4_K_M | Default coding and coordination |
 | argo-foundation-sec:8b | Foundation-Sec-8B-Reasoning, official Q4_K_M | Optional security analysis |
 | argo-vulnllm:7b | VulnLLM-R-7B, community Q4_K_M | Optional source review |
-| argo-qwen:27b | Qwen3.8-27B Heretic ARA, community Q4_K_M | Experimental deep review |
+| argo-qwen:27b | Qwen3.8-27B Heretic ARA, community Q4_K_M | Required finding/fix review; experimental model |
 
 Install only the third reviewer with `uv run python scripts/install_models.py --model argo-qwen:27b`. It downloads a checksum-pinned 16.8 GB GGUF.
 
 Ask Argo to “review these files with all three local models in parallel” to use `security.review_all`, or name Qwen for an individual `security.review`. The reviewers receive the same read-only source snapshot; the selected coding model compares their responses and performs any authorized edits. Ollama may queue requests when memory is insufficient. Completed reviews are saved independently, including when another reviewer fails or is cancelled.
 
-See [model provenance](config/models.lock.json). The legacy audit/chat commands retain local specialist adapters. Remote coding does not require the local models or a running Ollama service.
+See [model provenance](config/models.lock.json). The legacy audit/chat commands retain local specialist adapters. Mandatory finding reviews stay local regardless of the selected coding provider.
 
 ## Choose your coding model
 
@@ -62,6 +62,10 @@ OpenAI-compatible profiles use Chat Completions; Anthropic-compatible profiles u
 
 OpenRouter was validated with base URL https://openrouter.ai/api/v1, model meta/muse-spark-1.3-contributor, JSON schema mode and max_tokens. The connection probe starts with 2,048 output tokens and can increase the allowance on truncation within the selected model budget. The [Contributor tier](https://openrouter.ai/meta/muse-spark-1.3-contributor) permits prompts and outputs to be used to improve Meta's products.
 
+Requests to the official HTTPS OpenRouter endpoint identify the app as **Argo**, using the project repository URL and the `cli-agent` category. This enables [OpenRouter app attribution](https://openrouter.ai/docs/app-attribution) in usage analytics. API-key names and app attribution are separate; changing the key's label alone does not identify the app. Attribution headers use fixed public project metadata and are not added to other providers.
+
+OpenRouter requests use a stable session identifier per run and role (coordination, coding and compaction) for [cache-aware routing](https://openrouter.ai/docs/guides/best-practices/prompt-caching). Provider usage evidence retains reported input/cache tokens, costs and generation IDs, including available counters from unsuccessful attempts. Reports show the share of measured input tokens read from cache; missing counters remain unknown. Cache reuse depends on the upstream provider and the unchanged prompt prefix. Session identifiers and OpenRouter streaming options are not sent to other endpoints.
+
 For authentication, install [Hush](https://github.com/turinglabsorg/hush), import the credential from Bitwarden with hush pull --name NAME, then enter only NAME in the form. Argo invokes hush run --redact and injects the key into a fixed provider process. API keys are never saved in model settings or sent to code workers. Leave the credential field empty for endpoints without authentication. Selecting a remote endpoint sends task context and selected source to it.
 
 ![Coding endpoint and model selection](docs/assets/model-settings.svg)
@@ -73,6 +77,8 @@ Argo reads the selected model's limits from its API, caches them for five minute
 Before each coordination request, Argo estimates token use from UTF-8 text and retains a 10% safety margin plus a response reserve. This is an estimate, not the provider's exact tokenizer count. At 90% of the input budget, auto-compact summarizes older history, retaining the original task, the deterministic completed-tool ledger and recent results. It saves a verified compaction record and context.json before the next action. Failed compaction does not discard history or replay tools. F3 shows the context limit, estimated use and compaction count.
 
 Endpoints that do not publish context limits use an explicitly labelled 16,384-token fallback; set an override in F2 when the endpoint requires it. Foundation-Sec and VulnLLM reviews use 16,384-token contexts; Qwen reviews use 32,768. These local allocations are independent of the coding provider context. Large specialist reviews are split into source batches; cross-batch findings still require verification. Foundation-Sec uses temperature 0.3 and allows up to 20 minutes per inference, with a separate two-minute idle timeout and immediate cancellation, so active reasoning can continue past the old five-minute cutoff.
+
+If a local review still exhausts its expanded output allowance, Argo retries smaller source batches, with at most two subdivision levels. Successful batches are retained; a terminal failure preserves partial evidence and lists the paths still unreviewed. Transient local connection failures receive one retry. These retries repeat inference only and do not reapply edits or rerun tests.
 
 Reports, summaries and evidence persist. A new task currently starts a new conversation over the selected project or restored files; /resume reopens results, including local model responses, and does not replay actions or automatically load old conversation memory.
 
@@ -92,13 +98,23 @@ CLI equivalents:
 
 The default is the current directory. --isolated, --import and --continue use disposable workspaces instead. A saved snapshot cannot overwrite a mounted project. Home and filesystem root are rejected as project mounts.
 
-Python changes require passing pytest before completion. Other text files can be edited, with missing runtime verification explicitly recorded. Python 3.12, pytest, Bandit and Node.js 22 are installed. The `node.tests` tool runs tests/argo-security/*.test.cjs against already available project dependencies. Network package installation is unavailable; targeted controls do not establish full project test coverage. See [runtime contracts and limits](docs/isolated-agent.md).
+Python implementation changes require passing pytest before completion. Dedicated finding regressions can intentionally fail while demonstrating a defect; they are tracked separately from implementation fixes. Other text files can be edited, with missing runtime verification explicitly recorded. Python 3.12, pytest, Bandit and Node.js 22 are installed. The `node.tests` tool runs tests/argo-security/*.test.cjs against already available project dependencies. Network package installation is unavailable; targeted controls do not establish full project test coverage. See [runtime contracts and limits](docs/isolated-agent.md).
+
+Every finding enters a mandatory verification queue. The coordinator creates a secure-behavior regression and separate positive/negative controls against actual project code, runs them through `findings.test`, inspects the output and records `reproduced`, `refuted` or `inconclusive` with `findings.verdict`. The Findings tab shows the result, test paths and evidence. Refuted means the specific claim was contradicted in that tested scenario; generated tests are not independent security certification. Skips, setup errors and unavailable dependencies do not count as refutations. Explicit blockers remain incomplete coverage, and pending/stale findings block completion. Source or associated test edits require a fresh test run.
+
+After reproduction, Argo locks the original tests and helpers. It can repair the implementation, rerun the same regression and controls, and record `fixed` only when they all pass after a real source change. The Findings tab retains the original failing evidence alongside the passing retest. `project.tests` also runs an already installed Vitest suite; a failed, empty, skipped or outdated attempted suite blocks completion of an edit. Dependencies must be available for the Linux worker.
+
+`findings.verdict` automatically asks Qwen to assess the finding before accepting `reproduced` or `refuted`, then to compare original and repaired code before accepting `fixed`. Qwen receives the actual tests and runtime evidence. A missing, incomplete or dissenting review leaves verification open; an explicit blocker keeps the run incomplete. Generic source reviews cannot satisfy these checks. The Findings tab shows both assessments and evidence IDs, and Models shows live activity. Accepted reviews can be reused only for identical finding, verdict, test evidence and context; source changes require retesting and review. Model agreement adds scrutiny, not independent security certification.
+
+The default action budget starts at 24 and adds eight actions per finding, capped at 1,024; existing time, context and workspace limits still apply. `--max-steps` selects a strict 1–40 action cap instead. Exhausted limits preserve pending work in the report and never turn untested findings into a clean result.
 
 ### Local test database
 
 Use `/test-db mongodb` in the TUI, or `argo agent 'TASK' --test-database mongodb`, to start a fresh MongoDB for the task. The selection in the TUI lasts for the current app session; `/test-db off` disables it. Tests receive `ARGO_TEST_MONGODB_URI`. Connect with the project's existing MongoDB driver instead of starting or downloading a database binary.
 
 The database shares only the worker's loopback network, has no project mount or published ports, and stores synthetic data in temporary memory. Both containers are removed on completion, failure or cancellation. The worker keeps external networking disabled. Native test-runner dependencies must still be available for Linux; selecting a database does not install them.
+
+Within an enabled task, Argo can call `test.database.reset` to start its temporary database empty before a retest. Project files and the original regression tests stay unchanged. Tests must seed their own data after each reset.
 
 Install the pinned database image once with `uv run python scripts/install_test_database.py`.
 

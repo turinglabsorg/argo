@@ -2,7 +2,9 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from test_providers import endpoint
 
+from argo.agent import run_agent
 from argo.controller import Cancelled
 from argo.test_database import database_mode
 from argo.workspace import Workspace
@@ -32,6 +34,24 @@ def test_mongodb_real_crud_isolation_freshness_and_cleanup():
 
 
 @pytest.mark.live
+def test_fixture_reset_is_empty_preserves_files_and_requires_explicit_selection(tmp_path):
+    with Workspace() as workspace:
+        with pytest.raises(ValueError, match='operator-selected'):
+            workspace.reset_test_database()
+    probe = (Path(__file__).parent / 'fixtures/mongodb_probe.py').read_text()
+    actions = [
+        {'action': 'python.run', 'parameters': {'path': 'probe.py'}},
+        {'action': 'test.database.reset', 'parameters': {}},
+        {'action': 'python.run', 'parameters': {'path': 'probe.py'}},
+        {'action': 'finish', 'parameters': {'summary': 'The same fixture probe passes before and after reset'}},
+    ]
+    with endpoint('openai', replies=actions, metadata={'context_length': 131072}) as (coding, _):
+        result = run_agent('Check isolated fixture reset', tmp_path / 'runs', seed={'probe.py': probe}, coding=coding, use_mcp=False, test_database='mongodb', max_steps=4)
+    assert result['status'] == 'complete', result
+    assert (Path(result['report']).parent / 'code/probe.py').read_text() == probe
+
+
+@pytest.mark.live
 def test_mongodb_cleanup_after_start_failure_and_cancellation(monkeypatch):
     def failed_start(*args):
         raise RuntimeError("fixture startup failed")
@@ -44,6 +64,15 @@ def test_mongodb_cleanup_after_start_failure_and_cancellation(monkeypatch):
                 pass
         assert not failed.active
         assert subprocess.run(["docker", "inspect", failed.name], capture_output=True).returncode != 0
+    with pytest.raises(RuntimeError, match="fixture startup failed"):
+        with Workspace(test_database="mongodb") as resetting:
+            with monkeypatch.context() as patch:
+                patch.setattr("argo.workspace.start_mongodb", failed_start)
+                resetting.reset_test_database()
+    assert not resetting.active
+    assert not resetting.database_started
+    for name in [resetting.name, resetting.database_name]:
+        assert subprocess.run(["docker", "inspect", name], capture_output=True).returncode != 0
     stopped = False
 
     def check():

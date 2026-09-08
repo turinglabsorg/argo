@@ -15,11 +15,24 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from argo.context_budget import ModelLimits
 from argo.evidence import clean, private_dir
-from argo.sandbox import command
+from argo.provider_usage import capture_usage
+from argo.sandbox import AdapterTimeoutError, command
 
 SETTINGS = Path.home() / ".argo" / "models.json"
 DEFAULT_MODEL = "argo-coder:30b-a3b"
+OPENROUTER_APP_URL = "https://github.com/turinglabsorg/argo"
 LIMIT_CACHE = {}
+MAX_PROVIDER_RETRIES = 5
+
+
+class ProviderTransientError(RuntimeError):
+    def __init__(self, code):
+        self.code = code if code in {"timeout", "connection"} else "connection"
+        super().__init__("Provider request timed out" if self.code == "timeout" else "Provider connection interrupted")
+
+
+class ProviderRetryExhausted(RuntimeError):
+    pass
 
 
 class ProviderHTTPError(RuntimeError):
@@ -44,6 +57,7 @@ class ProviderResponseError(ValueError):
         "invalid_json": "Provider returned invalid JSON",
         "invalid_schema": "Provider response does not match the requested JSON schema",
         "invalid_format": "Provider returned an unsupported response format",
+        "response_limit": "Provider response exceeded the transport size limit",
     }
 
     def __init__(self, code):
@@ -148,21 +162,33 @@ def parse_json(content, schema):
     return data
 
 
-def request(profile, operation, messages=None, schema=None, tokens=4096, check=lambda: None):
+def request(profile, operation, messages=None, schema=None, tokens=4096, check=lambda: None, session_id=None, on_usage=lambda _: None):
     if not profile.credential:
-        return exchange(profile, operation, messages, schema, tokens, check)
+        try:
+            return exchange(profile, operation, messages, schema, tokens, check, session_id=session_id, on_usage=on_usage)
+        except httpx.TimeoutException as exc:
+            raise ProviderTransientError("timeout") from exc
+        except (httpx.NetworkError, httpx.RemoteProtocolError) as exc:
+            raise ProviderTransientError("connection") from exc
     binary = shutil.which("hush") or str(Path.home() / ".local/bin/hush")
     if not Path(binary).is_file():
         raise RuntimeError("Hush is required for this credential. Install Hush or choose a profile without authentication.")
-    payload = {"profile": profile.model_dump(), "operation": operation, "messages": clean(messages), "schema": schema, "tokens": tokens}
-    code, output, _ = command(
-        [binary, "run", "--name", profile.credential, "--env", "ARGO_PROVIDER_KEY", "--redact", "--", sys.executable, "-I", "-m", "argo.provider_worker"],
-        360, check, json.dumps(payload).encode(),
-    )
+    payload = {"profile": profile.model_dump(), "operation": operation, "messages": clean(messages), "schema": schema, "tokens": tokens, "session_id": session_id}
+    try:
+        code, output, _ = command(
+            [binary, "run", "--name", profile.credential, "--env", "ARGO_PROVIDER_KEY", "--redact", "--", sys.executable, "-I", "-m", "argo.provider_worker"],
+            360, check, json.dumps(payload).encode(),
+        )
+    except AdapterTimeoutError as exc:
+        raise ProviderTransientError("timeout") from exc
     if code:
         raise RuntimeError("Hush could not run the provider. Check the credential name and vault readiness.")
     result = json.loads(output)
+    for usage in result.get("usage", []):
+        on_usage(usage)
     if "error" in result:
+        if result.get("code") in {"timeout", "connection"}:
+            raise ProviderTransientError(result["code"])
         if result.get("code") in ProviderResponseError.MESSAGES:
             raise ProviderResponseError(result["code"])
         if result.get("code") == "http":
@@ -171,8 +197,20 @@ def request(profile, operation, messages=None, schema=None, tokens=4096, check=l
     return result["result"]
 
 
-def exchange(profile, operation, messages=None, schema=None, tokens=4096, check=lambda: None, key=""):
+def exchange(profile, operation, messages=None, schema=None, tokens=4096, check=lambda: None, key="", session_id=None, on_usage=lambda _: None):
     headers = {"Accept": "application/json, text/event-stream"}
+    endpoint = urlsplit(profile.base_url)
+    openrouter = endpoint.scheme == "https" and endpoint.hostname == "openrouter.ai" and endpoint.port in {None, 443}
+    if openrouter:
+        headers.update({
+            "HTTP-Referer": OPENROUTER_APP_URL,
+            "X-OpenRouter-Title": "Argo",
+            "X-OpenRouter-Categories": "cli-agent",
+        })
+        if operation == "generate" and session_id is not None:
+            if not isinstance(session_id, str) or not re.fullmatch(r"[a-zA-Z0-9._:-]{1,256}", session_id):
+                raise ValueError("Invalid provider session identifier")
+            headers["x-session-id"] = session_id
     if profile.protocol == "anthropic":
         headers["anthropic-version"] = "2023-06-01"
         if key:
@@ -214,10 +252,14 @@ def exchange(profile, operation, messages=None, schema=None, tokens=4096, check=
             body.update(format=schema, think=False, keep_alive="5m", options={"temperature": 0, "num_ctx": profile.context_window or 16384, "num_predict": limit})
         elif profile.protocol == "openai":
             body[profile.token_parameter] = limit
+            if openrouter:
+                body["stream_options"] = {"include_usage": True}
             if profile.output_mode == "json_object":
                 body["response_format"] = {"type": "json_object"}
             elif profile.output_mode == "json_schema":
                 body["response_format"] = {"type": "json_schema", "json_schema": {"name": "argo_result", "schema": schema, "strict": False}}
+            if openrouter and profile.output_mode in {"json_object", "json_schema"}:
+                body["provider"] = {"require_parameters": True}
         else:
             body["max_tokens"] = limit
             body["system"] = "\n\n".join(item["content"] for item in messages if item["role"] == "system")
@@ -233,19 +275,26 @@ def exchange(profile, operation, messages=None, schema=None, tokens=4096, check=
         with client.stream("POST", profile.url(), headers=headers, json=body) as response:
             if response.status_code >= 300:
                 raise http_error(response)
+            usage = {"response_complete": False}
             try:
-                content = decode_generation(response, profile.protocol, check, started)
+                content = decode_generation(response, profile.protocol, check, started, usage)
+                result = parse_json(content, schema)
+                usage["response_complete"] = True
+                return result
             except (KeyError, IndexError, TypeError) as exc:
                 raise ProviderResponseError("invalid_format") from exc
             except json.JSONDecodeError as exc:
                 raise ProviderResponseError("invalid_json") from exc
-    return parse_json(content, schema)
+            finally:
+                on_usage(usage)
 
 
 def budget(check, started, received):
     check()
-    if received > 16 * 1024**2 or time.monotonic() - started > 300:
-        raise TimeoutError("Provider response budget exceeded")
+    if received > 16 * 1024**2:
+        raise ProviderResponseError("response_limit")
+    if time.monotonic() - started > 300:
+        raise ProviderTransientError("timeout")
 
 
 def bounded_json(response, check, started):
@@ -285,9 +334,11 @@ def http_error(response):
     return ProviderHTTPError(response.status_code, retry_after, shared_pool)
 
 
-def decode_generation(response, protocol, check, started):
+def decode_generation(response, protocol, check, started, usage=None):
+    usage = usage if usage is not None else {}
     if protocol != "ollama" and "text/event-stream" not in response.headers.get("content-type", ""):
         data = bounded_json(response, check, started)
+        capture_usage(usage, data, protocol)
         if protocol == "anthropic":
             if data.get("stop_reason") == "max_tokens":
                 raise ProviderResponseError("output_limit")
@@ -315,7 +366,17 @@ def decode_generation(response, protocol, check, started):
                 done = True
                 break
             data = json.loads(value)
+        capture_usage(usage, data, protocol)
         if "error" in data or data.get("type") == "error":
+            error = data.get("error")
+            if isinstance(error, dict):
+                code = error.get("code")
+                if isinstance(code, str) and code.isdigit():
+                    code = int(code)
+                if isinstance(code, int) and not isinstance(code, bool) and 400 <= code <= 599:
+                    raise ProviderHTTPError(code)
+                if error.get("type") in {"overloaded_error", "api_error"}:
+                    raise ProviderHTTPError(529 if error["type"] == "overloaded_error" else 500)
             raise RuntimeError("Provider reported a generation error")
         if protocol == "ollama":
             content += data.get("message", {}).get("content", "")
@@ -362,19 +423,59 @@ def model_limits(profile, check=lambda: None, refresh=False):
     return limits
 
 
-def generate(profile, messages, schema, check=lambda: None, tokens=None):
+def retry_wait(seconds, check):
+    until = time.monotonic() + seconds
+    while time.monotonic() < until:
+        check()
+        time.sleep(min(0.1, max(0, until - time.monotonic())))
+    check()
+
+
+def retry_reason(error):
+    if isinstance(error, ProviderTransientError):
+        return str(error)
+    if isinstance(error, ProviderHTTPError) and error.status in {408, 500, 502, 503, 504, 529}:
+        return "Temporary provider failure (HTTP " + str(error.status) + ")"
+    if isinstance(error, ProviderResponseError) and error.code == "incomplete":
+        return "Provider stream ended before completion"
+    return None
+
+
+def generate(profile, messages, schema, check=lambda: None, tokens=None, on_retry=lambda _: None, session_id=None, on_usage=lambda _: None):
     limits = model_limits(profile, check)
     allowed = limits.output_budget(messages, schema, profile.max_tokens)
     current = min(tokens, allowed) if tokens else limits.initial_output(messages, schema, profile.max_tokens)
-    for attempt in range(4):
+    retries = expansions = 0
+    while True:
         check()
         try:
-            result = request(profile, "generate", messages, schema, current, check)
+            result = request(profile, "generate", messages, schema, current, check, session_id=session_id, on_usage=on_usage)
             break
         except ProviderResponseError as exc:
-            if exc.code != "output_limit" or current >= allowed or attempt == 3:
+            if exc.code == "output_limit":
+                if current >= allowed or expansions == 3:
+                    raise
+                current = min(allowed, current * 4) if expansions < 2 else allowed
+                expansions += 1
+                continue
+            reason = retry_reason(exc)
+            if reason is None:
                 raise
-            current = min(allowed, current * 4) if attempt < 2 else allowed
+        except (ProviderTransientError, ProviderHTTPError) as exc:
+            reason = retry_reason(exc)
+            if reason is None:
+                raise
+        if retries == MAX_PROVIDER_RETRIES:
+            on_retry({"phase": "exhausted", "retry": retries, "max_retries": MAX_PROVIDER_RETRIES, "reason": reason})
+            raise ProviderRetryExhausted(reason + "; stopped after 5 automatic retries")
+        retries += 1
+        delay = 2 ** (retries - 1)
+        details = {"retry": retries, "max_retries": MAX_PROVIDER_RETRIES, "reason": reason, "delay_seconds": delay}
+        on_retry({"phase": "waiting", **details})
+        retry_wait(delay, check)
+        on_retry({"phase": "retrying", **details})
+    if retries:
+        on_retry({"phase": "recovered", "retry": retries, "max_retries": MAX_PROVIDER_RETRIES})
     try:
         Draft202012Validator(schema).validate(result)
     except ValidationError as exc:

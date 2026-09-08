@@ -19,6 +19,7 @@ from argo.agent_models import (
     local_model_error,
     ready,
     review,
+    review_failure,
     review_team,
     structured,
 )
@@ -26,9 +27,26 @@ from argo.context_budget import ModelLimits, estimate_tokens
 from argo.controller import Cancelled
 from argo.conversation import Conversation, save_checkpoint
 from argo.evidence import EvidenceStore, clean, private_dir, read_evidence, redact, write_private
+from argo.finding_review import apply_review, check_review_edit, ensure_review, missing_reviews
+from argo.finding_validation import GUIDANCE as VERIFICATION_GUIDANCE
+from argo.finding_validation import (
+    RESOLVED,
+    apply_result,
+    check_verification_edit,
+    description,
+    invalidate,
+    next_verification,
+    queue,
+    run_tests,
+    selected_finding,
+    state,
+    verdict,
+)
+from argo.finding_validation import TOOLS as VERIFICATION_TOOLS
 from argo.mcp import MCPClient, default_profile
 from argo.model_activity import analysis_text
 from argo.project_inventory import inventory
+from argo.provider_usage import summarize_usage
 from argo.providers import model_limits
 from argo.scanners import read_sources
 from argo.test_database import database_mode
@@ -57,12 +75,15 @@ PATH = {"type": "string", "minLength": 1, "maxLength": 240}
 PATHS = {"type": "array", "items": PATH, "minItems": 1, "maxItems": 6, "uniqueItems": True}
 REVIEW_IDS = {"type": "array", "items": {"type": "string", "pattern": "^[a-f0-9]{16}$"}, "minItems": 1, "maxItems": 3, "uniqueItems": True}
 TOOLS = {
+    **VERIFICATION_TOOLS,
     "workspace.list": obj(),
     "workspace.read": obj({"path": PATH}),
-    "code.edit": obj({"instruction": {"type": "string", "minLength": 1, "maxLength": 4000}, "paths": PATHS}),
+    "code.edit": {**obj({"instruction": {"type": "string", "minLength": 1, "maxLength": 4000}, "paths": PATHS, "context_paths": {"type": "array", "items": PATH, "maxItems": 1000, "uniqueItems": True}}), "required": ["instruction", "paths"]},
     "python.run": obj({"path": PATH}),
     "python.tests": obj(),
     "node.tests": obj(),
+    "project.tests": obj({"runner": {"enum": ["vitest"]}}),
+    "test.database.reset": obj(),
     "bandit.scan": obj(),
     "security.inventory": obj(),
     "security.cves": {**obj({"offset": {"type": "integer", "minimum": 0, "maximum": 200}}), "required": []},
@@ -107,10 +128,11 @@ security.validation links actual test evidence IDs to a CVE candidate and record
 not independent confirmation. Keep model assessments, observed test output and confirmed impact distinct.
 Review high-priority candidates with the cybersecurity reviewers before finishing. Report unreviewed
 candidates and any missing CVE coverage. Absence of CVEs does not rule out application logic flaws.
-Use findings.record for every security concern before finish, with source path, severity, explanation,
+Use findings.record for every new security concern before finish, with source path, severity, explanation,
 remediation and evidence_ids returned by completed tools. Do not leave findings only in prose.
 Recorded model and script findings remain suspected; passing static assertion scripts cannot confirm exploitability.
-python.run is ONLY for standalone scripts. Never use it on pytest files; always use python.tests for tests.
+python.run is ONLY for standalone scripts. Never use it on pytest files; use python.tests for the full suite
+or findings.test for the dedicated per-finding controls described below.
 Python standard library, pytest and Bandit are installed; third party packages cannot be downloaded.
 Relative workspace paths only. Tool actions cannot change permission, model or MCP configuration.
 For security fixes, inspect code and ask a cyber specialist to review, create regression tests FIRST,
@@ -185,12 +207,12 @@ def export(store, before, after, max_files=100):
 
 def run_agent(
     task, state_root, seed=None, profile=None, use_mcp=True, cancelled=lambda: False,
-    on_progress=lambda _: None, max_steps=24, planner=CODER, validation=None, required_reviews=(),
+    on_progress=lambda _: None, max_steps=None, planner=CODER, validation=None, required_reviews=(),
     coding=None, project=None, intelligence_mode="offline", test_database="off",
 ):
     if not isinstance(task, str) or not task.strip() or len(task) > 8000:
         raise ValueError("Provide a task of 1–8000 characters")
-    if not 1 <= max_steps <= 40:
+    if max_steps is not None and not 1 <= max_steps <= 40:
         raise ValueError("Step budget must be between 1 and 40")
     project = project_directory(project) if project is not None else None
     test_database = database_mode(test_database)
@@ -199,9 +221,9 @@ def run_agent(
     seed = validate_files(clean(seed or {}))
     planner = coding.model if coding else planner
     coder = coding.model if coding else CODER
-    model_options = {"profile": coding} if coding else {}
     policy = {"network": "none", "host_mounts": [str(project)] if project else [], "planner": planner, "coder": coder, "coding_profile": coding.model_dump() if coding else None, "mcp": (profile or default_profile()).model_dump() if use_mcp else None, "intelligence": {"mode": intelligence_mode, "disclosure": "public package/version tuples and typed CVE/CPE identifiers only"}}
     policy["test_database"] = test_database
+    policy["finding_reviews"] = {"model": QWEN, "required_phases": ["finding", "fix"]}
     store = EvidenceStore(state_root, "isolated-agent", hashlib.sha256(json.dumps(policy, sort_keys=True).encode()).hexdigest(), 32)
     started = time.monotonic()
     deadline = 1800
@@ -209,6 +231,8 @@ def run_agent(
     snapshot = None
     validation_result = None
     compact_events = []
+    provider_retry_events = []
+    provider_usage_events, usage_records = [], []
     findings = []
     project_inventory, cve_catalog = None, None
 
@@ -220,19 +244,41 @@ def run_agent(
 
     def progress(stage, model=None, **details):
         store.set("status", stage)
-        on_progress({"run_id": store.run_id, "stage": stage, "model": model or planner, **clean(details)})
+        on_progress({"kind": "isolated_agent", "run_id": store.run_id, "stage": stage, "model": model or planner, **clean(details)})
 
-    def record_tool(action, result, step):
+    def provider_retry(operation, event):
+        nonlocal deadline
+        details = {"operation": operation, "model": coder if operation == "coding" else planner, **event}
+        if event["phase"] == "waiting":
+            deadline = min(14400, deadline + 360 + event["delay_seconds"])
+        identity = store.add("provider_retry", details)
+        provider_retry_events.append(identity)
+        progress("provider retry", details["model"], provider_retry=details)
+
+    def provider_usage(operation, usage):
+        details = {"operation": operation, **usage}
+        provider_usage_events.append(store.add("provider_usage", details))
+        usage_records.append(details)
+
+    def model_options(operation):
+        return {"profile": coding, "session_id": f"argo-{store.run_id}-{operation}", "on_usage": lambda usage: provider_usage(operation, usage)} if coding else {}
+
+    def record_tool(action, result, step, verification_invalidated=None):
         nonlocal findings
         name = action["tool"]
         record = {"step": step, "action": action, "result": result}
+        if verification_invalidated is not None:
+            record["verification_invalidated"] = verification_invalidated
         identity = store.add("agent_tool", record)
         additional = tool_findings(record, identity)
         if additional:
             findings = merge_findings(findings, additional)
         if name == "security.review":
             findings = apply_cve_reviews(findings, result, identity)
-        if additional or result.get("cve_assessments"):
+            apply_review(findings, result, identity)
+        if name in {"findings.test", "findings.verdict", "findings.defer"}:
+            apply_result(selected_finding(findings, result["finding_id"]), name, result, identity)
+        if additional or result.get("cve_assessments") or result.get("finding_review") or name in {"findings.test", "findings.verdict", "findings.defer"}:
             store.set("finding_count", len(findings))
             progress("findings", findings=findings)
         events.append({"tool": name, "evidence_id": identity, "exit_code": result.get("exit_code"), "model": result.get("model"), "status": result.get("status", "complete"), "test_hashes": result.get("test_hashes")})
@@ -269,6 +315,7 @@ def run_agent(
                 compact_events.append(identity)
             progress("auto-compact", compact={key: value for key, value in event.items() if key != "summary"})
         tested_files = node_tested_files = None
+        project_tests_attempted, project_tested_files = False, None
         latest_test = None
         workspace_options = {"test_database": test_database} if test_database != "off" else {}
         with Workspace(check, project=project, **workspace_options) as workspace:
@@ -307,25 +354,30 @@ def run_agent(
 
             if intelligence_mode == "connected" and re.search(r"audit|pentest|secur|sicurezz|vulnerab|cve|exploit|analizz|analy", task, re.I):
                 ensure_cves(0)
-            for step in range(max_steps):
+            step = -1
+            while step + 1 < (max_steps if max_steps is not None else min(1024, 24 + 8 * len(findings))):
+                step += 1
+                step_limit = max_steps if max_steps is not None else min(1024, 24 + 8 * len(findings))
                 check()
-                progress(f"step {step + 1}/{max_steps}")
+                progress(f"step {step + 1}/{step_limit}")
                 context = {
-                    "step": step + 1, "remaining_steps": max_steps - step,
+                    "step": step + 1, "remaining_steps": step_limit - step,
                     "completed_tools": [{"tool": event["tool"], "exit_code": event["exit_code"], "model": event["model"], "status": event["status"]} for event in events],
                     "intelligence_mode": intelligence_mode,
                     "test_database": workspace.database if test_database != "off" else None,
                     "cve_candidates": len(cve_catalog["candidates"]) if cve_catalog else 0,
+                    "finding_verification": queue(findings),
+                    "next_finding_verification": next_verification(findings),
                 }
                 opening = [
-                    {"role": "system", "content": SYSTEM + "\nTool argument schemas:\n" + json.dumps(catalog)},
+                    {"role": "system", "content": SYSTEM + VERIFICATION_GUIDANCE + "\nTool argument schemas:\n" + json.dumps(catalog)},
                     {"role": "user", "content": json.dumps({"operator_task": task, "workspace_mode": "project mounted read/write" if project else "disposable copy", "initial_files": list(seed)[:30], "initial_file_count": len(seed)})},
                 ]
                 closing = {"role": "user", "content": "Continue with the next action from the latest result. Do not repeat completed work.\nController status:\n" + json.dumps(context)}
-                messages = conversation.prepare(opening, closing, lambda messages, schema: structured(planner, messages, schema, check, tokens=min(8192, limits.context_window // 4), **model_options), check, compact_progress)
+                messages = conversation.prepare(opening, closing, lambda messages, schema: structured(planner, messages, schema, check, tokens=min(8192, limits.context_window // 4), on_retry=lambda event: provider_retry("auto-compact", event), **model_options("auto-compact")), check, compact_progress)
                 progress("coordination", context={"estimated_input_tokens": estimate_tokens(messages), "context_window": limits.context_window, "compactions": conversation.compactions})
                 try:
-                    decision = structured(planner, messages, schema, check, tokens=None if coding else 2000, **model_options)
+                    decision = structured(planner, messages, schema, check, tokens=None if coding else 2000, on_retry=lambda event: provider_retry("coordination", event), **model_options("coordination"))
                     Draft202012Validator(schema).validate(decision)
                     name, arguments = decision["action"], decision["parameters"]
                     Draft202012Validator(catalog[name]).validate(arguments)
@@ -334,11 +386,28 @@ def run_agent(
                         progress(name, coder if name == "code.edit" else planner)
                     if name == "finish":
                         final_files = workspace.call("export")["files"]
+                        if invalidate(findings, final_files, workspace.call("manifests")["files"]):
+                            progress("findings", findings=findings)
+                        pending = [item["id"] for item in findings if state(item) not in RESOLVED]
+                        if pending:
+                            observations.append({"error": "Verify every finding before finishing. Create regression/control tests, run findings.test and findings.verdict; record actual blockers with findings.defer.", "pending_finding_ids": pending[:20], "pending_count": len(pending)})
+                            continue
+                        if missing_reviews(findings):
+                            observations.append({"error": "Conclusive findings require Qwen's bound finding review and verified fixes also require its fix review. Call findings.verdict to obtain the mandatory review.", "finding_ids": missing_reviews(findings)})
+                            continue
                         changed = {path for path in seed.keys() | final_files.keys() if seed.get(path) != final_files.get(path)}
-                        if any(path.endswith(".py") for path in changed) and final_files != tested_files:
+                        unfinished_repairs = [item["id"] for item in findings if state(item) == "reproduced" and any(hashlib.sha256(final_files.get(path, "").encode()).hexdigest() != digest for path, digest in item["verification"]["reproduction"]["source_hashes"].items() if path in item["verification"]["reproduction"]["source_paths"])]
+                        if unfinished_repairs:
+                            observations.append({"error": "Implementation changed but the finding remains reproduced. Complete and verify the repair, or record an evidence-backed blocker with findings.defer.", "finding_ids": unfinished_repairs})
+                            continue
+                        if changed and project_tests_attempted and final_files != project_tested_files:
+                            observations.append({"error": "Rerun project.tests successfully against the current workspace before finishing. A failed, empty, skipped or outdated suite cannot verify the repair."})
+                            continue
+                        verified_test_paths = {path for item in findings if state(item) in {"reproduced", "refuted", "fixed"} for path in item["verification"]["test_hashes"]}
+                        if any(path.endswith(".py") for path in changed - verified_test_paths) and final_files != tested_files:
                             observations.append({"error": "Run python.tests after the last code change. Tests must pass before finishing a code task."})
                             continue
-                        untested = [path for path in changed if not (path.endswith(".py") and final_files == tested_files) and not (path.endswith((".js", ".cjs", ".mjs", ".ts", ".tsx")) and final_files == node_tested_files)]
+                        untested = [path for path in changed - verified_test_paths if not (path.endswith(".py") and final_files == tested_files) and not (path.endswith((".js", ".cjs", ".mjs", ".ts", ".tsx")) and final_files == node_tested_files)]
                         if untested:
                             gaps.append("Changes without runtime verification for their language: " + ", ".join(sorted(untested))[:1000])
                         if cve_catalog:
@@ -353,7 +422,7 @@ def run_agent(
                         if missing:
                             observations.append({"error": "Complete the requested security.review calls before finishing: " + ", ".join(sorted(missing))})
                             continue
-                        status, summary = "complete", arguments["summary"]
+                        status, summary = ("incomplete" if any(state(item) == "inconclusive" for item in findings) else "complete"), arguments["summary"]
                         break
                     if name == "workspace.list":
                         result = workspace.call("list")
@@ -378,6 +447,20 @@ def run_agent(
                         if name == "node.tests":
                             result["test_hashes"] = {path: hashlib.sha256(content.encode()).hexdigest() for path, content in before_execution.items() if path.startswith("tests/argo-security/") and path.endswith(".test.cjs")}
                             result["scope"] = "Targeted Node security tests; not the project's full test suite"
+                    elif name == "project.tests":
+                        project_tests_attempted = True
+                        before_execution = workspace.call("export")["files"]
+                        result = workspace.call("project_tests", **arguments)
+                        final_files = workspace.call("export")["files"]
+                        result["test_hashes"] = {path: hashlib.sha256(content.encode()).hexdigest() for path, content in before_execution.items() if path.startswith(("tests/", "test/")) or Path(path).name.startswith(("vitest.config.", "vite.config."))}
+                        if result["outcome"] == "passed" and final_files == before_execution:
+                            node_tested_files = dict(final_files)
+                            project_tested_files = dict(final_files)
+                        else:
+                            project_tested_files = None
+                            result["next_step"] = "Inspect the project runner failure or missing dependency. Do not interpret skipped, empty or failed suites as verification."
+                    elif name == "test.database.reset":
+                        result = workspace.reset_test_database()
                     elif name == "security.inventory":
                         result = inspect_inventory()
                     elif name == "security.cves":
@@ -390,16 +473,22 @@ def run_agent(
                         result = {**candidate, "intelligence": intelligence.enrich(candidate["cve_ids"], include_nvd=True)}
                     elif name == "code.edit":
                         paths = [validate_path(path) for path in arguments["paths"]]
+                        check_verification_edit(findings, paths)
+                        check_review_edit(findings, paths)
                         current = workspace.call("export")["files"]
                         context = {path: current.get(path, "") for path in paths}
+                        context_paths = arguments.get("context_paths", list(current))
+                        if any(validate_path(path) not in current for path in context_paths):
+                            raise ValueError("Coding context_paths must name existing visible workspace files")
                         feedback = {"latest_test": latest_test, "context_summary": conversation.summary}
                         context_budget = limits.input_budget - estimate_tokens([task, arguments, feedback]) - 2048
                         if estimate_tokens(context) > context_budget:
                             raise ValueError("Selected files exceed the coding model context budget; edit fewer files at a time")
-                        for path, content in current.items():
+                        for path in context_paths:
+                            content = current[path]
                             if path not in context and estimate_tokens({**context, path: content}) <= context_budget:
                                 context[path] = content
-                        values = edit(arguments["instruction"], paths, context, check, task=task, feedback=feedback, **model_options)
+                        values = edit(arguments["instruction"], paths, context, check, task=task, feedback=feedback, on_retry=lambda event: provider_retry("coding", event), validate_code=lambda values: workspace.call("validate_code", files=values) if any(path.endswith((".cjs", ".mjs")) for path in values) else None, **model_options("coding"))
                         result = workspace.call("write", files=values, expected={path: current.get(path) for path in values})
                         final_files = workspace.call("export")["files"]
                         result["diff"] = "\n".join(
@@ -448,7 +537,7 @@ def run_agent(
                             message = local_model_error(exc)
                             gaps.append(model + ": " + message)
                             progress("security.review", model, text=message, error=True)
-                            result = {"model": model, "status": "failed", "error": message, "next_step": "Continue source review with the selected coding model and report this gap."}
+                            result = {**review_failure(model, exc), "next_step": "Retry unreviewed_paths individually if the failure is recoverable. Completed source segments and findings are retained; report any remaining coverage gap."}
                     elif name == "security.validation":
                         candidate = next((item for item in findings if item["id"] == arguments["candidate_id"] and item["rule"] == "agent.cve"), None)
                         if not candidate:
@@ -463,6 +552,38 @@ def run_agent(
                         candidate["evidence_ids"] = list(dict.fromkeys([*candidate["evidence_ids"], *arguments["test_evidence_ids"]]))
                         candidate["validation"] = (candidate.get("validation") or "") + "\n\nRuntime evidence attached. Model interpretation: " + arguments["interpretation"] + ". " + arguments["explanation"] + "\nIndependent confirmation remains pending."
                         progress("findings", findings=findings)
+                    elif name == "findings.list":
+                        offset = arguments["offset"]
+                        result = {**queue(findings, offset, 20), "findings": sorted(findings, key=lambda item: state(item) in RESOLVED)[offset:offset + 20]}
+                    elif name == "findings.test":
+                        item = selected_finding(findings, arguments["finding_id"])
+
+                        def record_case(role, output):
+                            progress("finding test", text=item["title"] + " · " + role, provisional=False)
+                            return record_tool({"tool": "findings.test_case", "arguments": {"finding_id": item["id"], "role": role, "path": output["path"]}}, output, step + 1)
+
+                        result = run_tests(workspace, item, arguments, record_case)
+                    elif name == "findings.verdict":
+                        item = selected_finding(findings, arguments["finding_id"])
+                        invalidate(findings, workspace.call("export")["files"], workspace.call("manifests")["files"])
+                        if not any(event["tool"] == "findings.test" and event["evidence_id"] == arguments["test_evidence_id"] for event in events):
+                            raise ValueError("Verdict requires actual findings.test evidence from this run")
+                        test_result = read_evidence(store.path, arguments["test_evidence_id"])["data"]["result"]
+                        result = verdict(item, arguments, test_result)
+                        if arguments["interpretation"] != "inconclusive":
+                            deadline = 14400
+                            result["review_evidence_id"] = ensure_review(
+                                item, arguments, test_result, workspace, store.path,
+                                record_result=lambda reviewed: record_tool({"tool": "security.review", "arguments": {"model": "qwen", "finding_id": item["id"], "phase": reviewed["finding_review"]["phase"]}}, reviewed, step + 1),
+                                check=check, on_progress=lambda **details: progress("security.review", QWEN, **details),
+                            )
+                            assessment = read_evidence(store.path, result["review_evidence_id"])["data"]["result"]
+                            result["review"] = {key: assessment[key] for key in ("model", "decision", "summary", "test_assessment", "remaining_concerns")}
+                    elif name == "findings.defer":
+                        selected_finding(findings, arguments["finding_id"])
+                        if set(arguments["evidence_ids"]) - {event["evidence_id"] for event in events}:
+                            raise ValueError("Blocker cites unknown tool evidence")
+                        result = dict(arguments)
                     elif name == "findings.record":
                         known_evidence = {event["evidence_id"] for event in events}
                         for item in arguments["findings"]:
@@ -475,12 +596,18 @@ def run_agent(
                         result = mcp.call(name.removeprefix("mcp."), arguments)
                     else:
                         raise ValueError("Tool is not available")
-                    identity = record_tool(action, result, step + 1)
+                    verification_invalidated = None
+                    if name in {"code.edit", "python.run", "python.tests", "node.tests", "project.tests", "findings.test"}:
+                        final_files = workspace.call("export")["files"]
+                        if invalidate(findings, final_files, workspace.call("manifests")["files"]):
+                            progress("findings", findings=findings)
+                        verification_invalidated = [item["id"] for item in findings if state(item) == "stale"]
+                    identity = record_tool(action, result, step + 1, verification_invalidated)
                     visible = cve_page(result, arguments.get("offset", 0)) if name == "security.cves" else (inventory_summary(result) if name == "security.inventory" else result)
                     text = json.dumps(clean(visible))
                     observation = {"action": action, "untrusted_result": text, "evidence_id": identity}
                     observations.append(observation)
-                    if name in {"python.tests", "node.tests"}:
+                    if name in {"python.tests", "node.tests", "project.tests"}:
                         latest_test = observation
                 except (ValueError, KeyError, ValidationError) as exc:
                     message = action_validation_error(exc) if isinstance(exc, ValidationError) else redact(str(exc))[:600]
@@ -503,11 +630,17 @@ def run_agent(
         status, summary = "failed", redact(str(exc))[:1000]
     finally:
         try:
+            unresolved = [item for item in findings if state(item) not in {"reproduced", "refuted", "fixed"}]
+            if unresolved:
+                gaps.append(f"Runtime verification unresolved for {len(unresolved)}/{len(findings)} findings: " + ", ".join(item["id"] + " (" + state(item) + ")" for item in unresolved))
             sanitized = clean(final_files)
             if sanitized != final_files:
-                gaps.append("Redaction changed exported text. Exported files must be retested before use.")
-                if status == "complete":
-                    status = "incomplete"
+                if final_files == seed:
+                    gaps.append("Evidence export contains redacted text; workspace source was unchanged. Do not use the exported snapshot as a tested application build.")
+                else:
+                    gaps.append("Redaction changed exported text. Exported files must be retested before use.")
+                    if status == "complete":
+                        status = "incomplete"
             snapshot = export(store, clean(seed), sanitized, max_files=1000 if project else 100)
             report = {
                 "kind": "isolated_agent", "run_id": store.run_id, "engagement_id": "isolated-agent", "status": status,
@@ -516,15 +649,27 @@ def run_agent(
                 "models": {"coordinator": planner, "coder": coder, "security": list(SPECIALISTS.values())},
                 "coding_profile": coding.model_dump() if coding else None,
                 "context_compactions": compact_events,
+                "provider_retries": provider_retry_events,
+                "provider_usage": provider_usage_events,
+                "usage_summary": summarize_usage(usage_records),
                 "project": str(project) if project else None,
                 "intelligence": {"mode": intelligence_mode, "inventory": project_inventory, "catalog": cve_catalog},
                 "test_database": test_database,
                 "independent_validation": validation_result,
+                "finding_verification": queue(findings, limit=0),
             }
             write_private(store.path / "report.json", json.dumps(clean(report), indent=2) + "\n")
             lines = ["# Argo isolated agent", "", "Status: " + status, "", summary, "", "## Findings", ""]
             for item in findings:
                 lines += [f"### {item['title']}", "", f"{item['status']} · {item['severity']} · {item['asset']}", "", item["explanation"], "", "Remediation: " + item["remediation"], "", "Evidence: " + ", ".join(item["evidence_ids"]), ""]
+                lines += [description(item), ""]
+            if provider_usage_events:
+                totals = report["usage_summary"]
+                measured = totals["cache_measured_responses"]
+                ratio = f"{totals['cache_hit_ratio']:.1%}" if totals["cache_hit_ratio"] is not None else "unavailable"
+                lines += ["## Provider usage", "", f"Prompt tokens read from cache: {ratio}. Cache counters available for {measured}/{totals['responses']} responses. Missing counters are not counted as cache misses; failed attempts may have incomplete usage.", ""]
+                lines += [f"- Evidence: `{identity}`" for identity in provider_usage_events]
+                lines.append("")
             lines += ["## Tool evidence", ""]
             lines += [f"- `{event['tool']}`: `{event['evidence_id']}` (exit: {event['exit_code']})" for event in events]
             lines += ["", "## Artifacts", "", "Files were changed directly in the mounted project: " + str(project) if project else "Disposable workspace; original projects were not changed.", "Code snapshot: `code/`. Changes: `changes.diff`.", "", "Security reviews are hypotheses. Test results apply only to the executed tests; generated tests are not independent proof of security.", "", *gaps]
