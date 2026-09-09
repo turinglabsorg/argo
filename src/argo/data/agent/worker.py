@@ -282,8 +282,13 @@ def dispatch(request):
                 target = directory + "/source" + PurePosixPath(name).suffix
                 with open(target, "w") as stream:
                     stream.write(content)
-                if execute(["node", "--check", target])["exit_code"] != 0:
-                    raise ValueError("JavaScript syntax validation failed before writing: " + name)
+                checked = execute(["node", "--check", target])
+                if checked["exit_code"] != 0:
+                    line = re.search(r"^" + re.escape(target) + r":(\d+)$", checked["stderr"], re.M)
+                    reason = re.search(r"^SyntaxError: ([^\r\n]{1,240})", checked["stderr"], re.M)
+                    location = name + (":" + line[1] if line else "")
+                    detail = ": " + reason[1] if reason else ""
+                    raise ValueError("JavaScript syntax validation failed before writing: " + location + detail)
         return {"syntax_checked": sorted(name for name in values if name.endswith((".cjs", ".mjs")))}
     if action == "write":
         values = request["files"]

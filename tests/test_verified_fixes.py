@@ -279,6 +279,31 @@ def test_javascript_syntax_validation_never_executes_source():
 
 
 @pytest.mark.live
+def test_coder_receives_syntax_location_without_source_excerpt_and_repairs_it():
+    path = 'tests/argo-security/syntax.test.cjs'
+    source = "const test = require('node:test');\nconst assert = require('node:assert/strict');\nconst value = ; // private-source-marker\ntest('control', () => assert.equal(value, 2));\n"
+    calls = 0
+
+    def reply(body):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            feedback = body['messages'][-1]['content']
+            assert path + ':3' in feedback
+            assert "Unexpected token ';'" in feedback
+            assert 'private-source-marker' not in feedback
+            assert '/tmp/argo-syntax-' not in feedback
+        return {'files': [{'path': path, 'content': source if calls == 1 else source.replace('value = ;', 'value = 2;')}]}
+
+    with Workspace() as workspace, endpoint('openai', replies=reply, metadata={'context_length': 131072}) as (coding, _):
+        result = edit('Create the runtime control', [path], {}, profile=coding, validate_code=lambda values: workspace.call('validate_code', files=values))
+        assert calls == 2
+        assert workspace.call('export')['files'] == {}
+        workspace.call('write', files=result)
+        assert workspace.call('finding_test', path=path)['outcome'] == 'passed'
+
+
+@pytest.mark.live
 def test_coder_line_arrays_preserve_executable_multiline_source():
     path = 'tests/argo-security/lines.test.cjs'
     lines = ["const test = require('node:test');", "const assert = require('node:assert/strict');", "// This comment must not swallow the following test.", "test('multiline output', () => {", "  assert.equal(1 + 1, 2);", "});"]
