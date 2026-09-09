@@ -46,6 +46,7 @@ COMMANDS = [
     "/cve",
     "/workspace",
     "/test-db",
+    "/reviews",
     "/isolated",
     "/agent",
     "/models",
@@ -78,6 +79,7 @@ Coding model       /model or F2 (local / OpenAI / Anthropic)
 All models         /models or F3 (roles, activity and live responses)
 Mounted project    /workspace [PATH]
 Test database      /test-db [mongodb | off]
+Local reviews      /reviews [on | off] (this session)
 Disposable mode    /isolated
 Import project     /import /path/to/project
 Fresh workspace    /reset
@@ -299,6 +301,7 @@ class ArgoApp(App):
         self.agent_profile = default_profile()
         self.agent_mcp = True
         self.test_database = "off"
+        self.skip_local_reviews = False
         self.project = Path.cwd().resolve() if project is ... else project
         self.settings_path = settings_path
         self.coding = load_settings(settings_path).coding
@@ -574,6 +577,12 @@ class ArgoApp(App):
                         raise ValueError("Use /test-db mongodb or /test-db off")
                     self.test_database = args[0]
                 self.say("ARGO", "Test database: " + self.test_database + (" · temporary, worker loopback only" if self.test_database == "mongodb" else ""))
+            elif command == "/reviews" and len(args) <= 1:
+                if args:
+                    if args[0] not in {"on", "off"}:
+                        raise ValueError("Use /reviews on or /reviews off")
+                    self.skip_local_reviews = args[0] == "off"
+                self.say("ARGO", "Local reviews: " + ("off · Qwen skipped; runtime tests remain required" if self.skip_local_reviews else "on · Qwen finding/fix review required"))
             elif command == "/isolated" and not args:
                 self.project = None
                 self.agent_seed = {}
@@ -853,6 +862,7 @@ class ArgoApp(App):
                 "coding": self.coding.model_copy(deep=True),
                 "intelligence_mode": load_mode(self.intelligence_path),
                 "test_database": self.test_database,
+                "skip_local_reviews": self.skip_local_reviews,
                 "cancelled": self.cancel_event.is_set,
                 "on_progress": lambda data: self.call_from_thread(self.progress, data),
             }
@@ -1056,6 +1066,8 @@ class ArgoApp(App):
             self.refresh_findings()
             self.refresh_case()
             if report.get("kind") == "isolated_agent":
+                if report.get("local_reviews") == "skipped_by_operator":
+                    self.say("ARGO", "This run skipped local reviews by operator choice. No Qwen approval.")
                 if report.get("project"):
                     self.agent_seed = {}
                     self.ui("#views", TabbedContent).active = "chat-tab"

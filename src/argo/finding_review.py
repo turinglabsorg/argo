@@ -67,15 +67,15 @@ def apply_review(findings, result, evidence_id):
     item["evidence_ids"] = list(dict.fromkeys([*item["evidence_ids"], evidence_id]))
 
 
-def check_review_edit(findings, paths):
+def check_review_edit(findings, paths, require_review=True):
     for item in findings:
         verification = item.get("verification") or {}
         baseline = verification.get("reproduction")
-        if baseline and not approved_review(item, "reproduced", baseline["test_evidence_id"]):
+        if require_review and baseline and not approved_review(item, "reproduced", baseline["test_evidence_id"]):
             raise ValueError("Qwen must review the original reproduction before implementation edits")
         affected = {item["asset"], *verification.get("source_paths", [])}
         if state(item) == "inconclusive" and not baseline and affected.intersection(paths):
-            raise ValueError("Deferral does not authorize fixing this finding. Retest it and obtain Qwen's finding review first")
+            raise ValueError("Deferral does not authorize fixing this finding. Retest it first" + (" and obtain Qwen's finding review" if require_review else ""))
 
 
 def missing_reviews(findings):

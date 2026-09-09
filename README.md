@@ -4,7 +4,7 @@ Review code. Investigate security issues. Apply fixes and verify them.
 
 Argo is a terminal agent with specialist local security models and your choice of local or remote coding endpoint. It edits the project you open and executes Python and targeted Node.js security tests in Docker.
 
-Launch Argo from a project directory: that directory is mounted read/write, and edits immediately change its files. F2 or /model selects any model ID through an Ollama, OpenAI-compatible or Anthropic-compatible endpoint. The selected model coordinates tools and writes code. Qwen3.8 27B reviews each conclusive finding and its fix automatically. Foundation-Sec and VulnLLM provide additional security opinions; all three can also review source individually or in parallel.
+Launch Argo from a project directory: that directory is mounted read/write, and edits immediately change its files. F2 or /model selects any model ID through an Ollama, OpenAI-compatible or Anthropic-compatible endpoint. The selected model coordinates tools and writes code. By default, Qwen3.8 27B reviews each conclusive finding and its fix automatically. Foundation-Sec and VulnLLM provide additional security opinions; all three can also review source individually or in parallel.
 
 Code executes in a non-root, offline container with only the selected project mounted. Provider credentials, the Docker socket and other host directories are not mounted. Files inside the selected project are accessible to its code. A separate immutable broker connects to configured remote MCP tools.
 
@@ -107,6 +107,8 @@ After reproduction, Argo locks the original tests and helpers. It can repair the
 `findings.verdict` automatically asks Qwen to assess the finding before accepting `reproduced` or `refuted`, then to compare original and repaired code before accepting `fixed`. Qwen receives the actual tests and runtime evidence. A missing, incomplete or dissenting review leaves verification open; an explicit blocker keeps the run incomplete. Generic source reviews cannot satisfy these checks. The Findings tab shows both assessments and evidence IDs, and Models shows live activity. Accepted reviews can be reused only for identical finding, verdict, test evidence and context; source changes require retesting and review. Model agreement adds scrutiny, not independent security certification.
 
 The default mounted-project budget starts at 24 plus the visible file count (up to 256), then adds eight actions per finding, capped at 1,024; disposable fixtures retain the 24-action base; existing time, context and workspace limits still apply. `--max-steps` selects a strict 1–40 action cap instead. Exhausted limits preserve pending work in the report and never turn untested findings into a clean result.
+
+To work without local specialist inference, use `argo agent 'TASK' --skip-local-reviews`, or `/reviews off` before starting a TUI task. This explicitly skips Qwen finding/fix approval and removes all local specialist tools for that run. The selected coding profile still coordinates, authors tests and edits code; select a remote profile to keep inference off the computer. Runtime tests, unchanged regression/control requirements, source bindings and incomplete-finding checks remain enforced. Reports visibly record the skipped reviews and never imply Qwen approval. The CLI flag applies to one run; the TUI choice lasts for the current app session. `/reviews on` restores the default. Saved reports and model responses cannot change this setting.
 
 ### Local test database
 

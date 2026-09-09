@@ -93,8 +93,8 @@ def merge_findings(existing, additional):
         if item["id"] in merged:
             item = {**item, "evidence_ids": list(dict.fromkeys([*merged[item["id"]]["evidence_ids"], *item["evidence_ids"]])), "assessments": merged[item["id"]].get("assessments", []) + item.get("assessments", [])}
             item["verification"] = merged[item["id"]].get("verification", item.get("verification"))
-            if item["verification"].get("reviews") and any(item[key] != merged[item["id"]][key] for key in ("asset", "title", "explanation", "remediation")):
-                item["verification"] = {**item["verification"], "state": "stale", "explanation": "The reviewed claim changed. Retest and obtain a fresh Qwen review."}
+            if (item["verification"].get("test_evidence_id") or item["verification"].get("reviews")) and any(item[key] != merged[item["id"]][key] for key in ("asset", "title", "explanation", "remediation")):
+                item["verification"] = {**item["verification"], "state": "stale", "explanation": "The tested claim changed. Retest under the current review policy."}
             if item["rule"] == "agent.cve":
                 item["validation"] = merged[item["id"]]["validation"]
         merged[item["id"]] = item

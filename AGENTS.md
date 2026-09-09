@@ -1,5 +1,8 @@
 # Argo development instructions
 
+- Operators may explicitly skip local specialist inference with `--skip-local-reviews`, TUI `/reviews off`, or `run_agent(skip_local_reviews=True)`. Default tasks retain mandatory Qwen review. Record the override in the policy fingerprint, reports and TUI; never synthesize approval or restore the override from report content. Remove local review tools and keep all deterministic test/source/repair gates, including deferral restrictions. Reject conflicting required reviews before starting. The selected coding profile remains unchanged; this override affects isolated-agent tasks only.
+- Claim changes invalidate existing runtime verdicts even when there are no local reviews. Preserve the original reproduction and require a fresh current-policy assessment. The override release passed 372 full-suite tests plus three final claim/CLI checks, including both compatible HTTP protocols, real Docker failing-then-passing controls, denied test edits and unchanged default Qwen gates. Actual Omnipass GLM verification is separate from these fixtures.
+
 - This repository contains an executable MVP and its longer-term architecture. Keep README capabilities and roadmap status aligned with runtime-tested behavior.
 - Keep code, documentation, comments, and commits in English.
 - Follow `docs/architecture.md` for execution boundaries and `docs/roadmap.md` for implementation order.

@@ -56,6 +56,30 @@ async def test_tui_test_database_selection(tmp_path, monkeypatch, size):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("size", [(80, 30), (120, 40)])
+async def test_tui_local_review_override_is_explicit_and_session_only(tmp_path, monkeypatch, size):
+    selected = []
+
+    def capture(app, prompt):
+        selected.append(app.skip_local_reviews)
+        app.finish()
+
+    monkeypatch.setattr(ArgoApp, "agent_work", capture)
+    app = ArgoApp(tmp_path / "runs", project=None, settings_path=tmp_path / "models.json")
+    assert not app.skip_local_reviews
+    async with app.run_test(size=size) as pilot:
+        app.dispatch("/reviews off")
+        app.dispatch("/reviews invalid")
+        assert app.skip_local_reviews
+        app.dispatch("/agent Check without local inference")
+        assert selected == [True]
+        app.dispatch("/reviews on")
+        assert not app.skip_local_reviews
+        await pilot.pause()
+    assert not ArgoApp(tmp_path / "runs", project=None, settings_path=tmp_path / "models.json").skip_local_reviews
+
+
+@pytest.mark.asyncio
 async def test_tui_small_screen_commands_and_literal_rendering(tmp_path):
     app = ArgoApp(tmp_path)
     async with app.run_test(size=(80, 24)) as pilot:

@@ -31,6 +31,8 @@ from argo.finding_review import apply_review, check_review_edit, ensure_review, 
 from argo.finding_validation import GUIDANCE as VERIFICATION_GUIDANCE
 from argo.finding_validation import (
     RESOLVED,
+    REVIEW_GUIDANCE,
+    SKIPPED_REVIEW_GUIDANCE,
     apply_result,
     check_verification_edit,
     description,
@@ -212,12 +214,16 @@ def export(store, before, after, max_files=100):
 def run_agent(
     task, state_root, seed=None, profile=None, use_mcp=True, cancelled=lambda: False,
     on_progress=lambda _: None, max_steps=None, planner=CODER, validation=None, required_reviews=(),
-    coding=None, project=None, intelligence_mode="offline", test_database="off",
+    coding=None, project=None, intelligence_mode="offline", test_database="off", skip_local_reviews=False,
 ):
     if not isinstance(task, str) or not task.strip() or len(task) > 8000:
         raise ValueError("Provide a task of 1–8000 characters")
     if max_steps is not None and not 1 <= max_steps <= 40:
         raise ValueError("Step budget must be between 1 and 40")
+    if type(skip_local_reviews) is not bool:
+        raise ValueError("skip_local_reviews must be an operator-selected boolean")
+    if skip_local_reviews and required_reviews:
+        raise ValueError("Cannot skip local reviews while requiring specialist reviews")
     project = project_directory(project) if project is not None else None
     test_database = database_mode(test_database)
     connected_audit = intelligence_mode == "connected" and re.search(r"audit|pentest|secur|sicurezz|vulnerab|cve|exploit|analizz|analy", task, re.I)
@@ -229,10 +235,15 @@ def run_agent(
     policy = {"network": "none", "host_mounts": [str(project)] if project else [], "planner": planner, "coder": coder, "coding_profile": coding.model_dump() if coding else None, "mcp": (profile or default_profile()).model_dump() if use_mcp else None, "intelligence": {"mode": intelligence_mode, "disclosure": "public package/version tuples and typed CVE/CPE identifiers only"}}
     policy["test_database"] = test_database
     policy["finding_reviews"] = {"model": QWEN, "required_phases": ["finding", "fix"]}
+    policy["local_reviews"] = "skipped_by_operator" if skip_local_reviews else "enabled"
+    if skip_local_reviews:
+        policy["finding_reviews"] = {"model": None, "required_phases": [], "status": "skipped_by_operator"}
     store = EvidenceStore(state_root, "isolated-agent", hashlib.sha256(json.dumps(policy, sort_keys=True).encode()).hexdigest(), 32)
     started = time.monotonic()
     deadline = 14400 if connected_audit or set(required_reviews) & {ANALYST, QWEN} else 1800
     status, summary, gaps, events, final_files = "failed", "", [], [], dict(seed)
+    if skip_local_reviews:
+        gaps.append("Local specialist reviews, including mandatory Qwen finding/fix review, were skipped by operator choice. Runtime tests and source/test bindings remain enforced; no independent model review was performed.")
     snapshot = None
     validation_result = None
     compact_events = []
@@ -302,8 +313,13 @@ def run_agent(
         store.add("model_limits", limits.model_dump())
         progress("model limits", limits=limits.model_dump())
         store.add("agent_policy", policy)
+        if skip_local_reviews:
+            progress("review policy", status="Local reviews skipped by operator · runtime tests required")
         store.add("operator_task", {"task": task})
         catalog = dict(TOOLS)
+        if skip_local_reviews:
+            for tool in ("security.review", "security.review_all"):
+                catalog.pop(tool)
         mcp = MCPClient(profile or default_profile(), check) if use_mcp else None
         if mcp:
             progress("mcp discovery")
@@ -375,14 +391,15 @@ def run_agent(
                     "step": step + 1, "remaining_steps": step_limit - step,
                     "completed_tools": [{"tool": event["tool"], "exit_code": event["exit_code"], "model": event["model"], "status": event["status"]} for event in events],
                     "intelligence_mode": intelligence_mode,
+                    "local_reviews": policy["local_reviews"],
                     "test_database": workspace.database if test_database != "off" else None,
                     "cve_candidates": len(cve_catalog["candidates"]) if cve_catalog else 0,
                     "finding_verification": queue(findings),
-                    "next_finding_verification": next_verification(findings, finding_test_results),
+                    "next_finding_verification": next_verification(findings, finding_test_results, require_review=not skip_local_reviews),
                     "action_recovery": {"consecutive_errors": consecutive_errors, "max_consecutive_errors": MAX_ACTION_ERRORS},
                 }
                 opening = [
-                    {"role": "system", "content": SYSTEM + VERIFICATION_GUIDANCE + "\nTool argument schemas:\n" + json.dumps(catalog)},
+                    {"role": "system", "content": SYSTEM + VERIFICATION_GUIDANCE + (SKIPPED_REVIEW_GUIDANCE if skip_local_reviews else REVIEW_GUIDANCE) + "\nTool argument schemas:\n" + json.dumps(catalog)},
                     {"role": "user", "content": json.dumps({"operator_task": task, "workspace_mode": "project mounted read/write" if project else "disposable copy", "initial_files": list(seed)[:30], "initial_file_count": len(seed)})},
                 ]
                 closing = {"role": "user", "content": "Continue with the next action from the latest result. Do not repeat completed work.\nController status:\n" + json.dumps(context)}
@@ -404,7 +421,7 @@ def run_agent(
                         pending = [item["id"] for item in findings if state(item) not in RESOLVED]
                         if pending:
                             raise ValueError("Verify every finding before finishing. Create regression/control tests, run findings.test and findings.verdict; record actual blockers with findings.defer.")
-                        if missing_reviews(findings):
+                        if not skip_local_reviews and missing_reviews(findings):
                             raise ValueError("Conclusive findings require Qwen's bound finding review and verified fixes also require its fix review. Call findings.verdict to obtain the mandatory review.")
                         changed = {path for path in seed.keys() | final_files.keys() if seed.get(path) != final_files.get(path)}
                         unfinished_repairs = [item["id"] for item in findings if state(item) == "reproduced" and any(hashlib.sha256(final_files.get(path, "").encode()).hexdigest() != digest for path, digest in item["verification"]["reproduction"]["source_hashes"].items() if path in item["verification"]["reproduction"]["source_paths"])]
@@ -422,7 +439,7 @@ def run_agent(
                             unreviewed = [item["id"] for item in cve_catalog["candidates"] if not next((f.get("assessments") for f in findings if f["id"] == item["id"]), None)]
                             if unreviewed:
                                 gaps.append(f"{len(unreviewed)} CVE candidates have no successful specialist applicability assessment")
-                            if len(unreviewed) == len(cve_catalog["candidates"]) and unreviewed and not any(event["tool"] == "security.review" for event in events):
+                            if not skip_local_reviews and len(unreviewed) == len(cve_catalog["candidates"]) and unreviewed and not any(event["tool"] == "security.review" for event in events):
                                 raise ValueError("Review CVE candidates with security.review_all and relevant source paths before finishing. If reviewers fail, report the missing coverage.")
                         reviewed = {event.get("model") for event in events if event["tool"] == "security.review" and event.get("status") != "failed"}
                         missing = set(required_reviews) - reviewed
@@ -480,7 +497,7 @@ def run_agent(
                     elif name == "code.edit":
                         paths = [validate_path(path) for path in arguments["paths"]]
                         check_verification_edit(findings, paths)
-                        check_review_edit(findings, paths)
+                        check_review_edit(findings, paths, require_review=not skip_local_reviews)
                         current = workspace.call("export")["files"]
                         context = {path: current.get(path, "") for path in paths}
                         context_paths = arguments.get("context_paths", list(current))
@@ -582,7 +599,7 @@ def run_agent(
                             raise ValueError("Verdict requires actual findings.test evidence from this run")
                         test_result = read_evidence(store.path, arguments["test_evidence_id"])["data"]["result"]
                         result = verdict(item, arguments, test_result)
-                        if arguments["interpretation"] != "inconclusive":
+                        if arguments["interpretation"] != "inconclusive" and not skip_local_reviews:
                             deadline = 14400
                             result["review_evidence_id"] = ensure_review(
                                 item, arguments, test_result, workspace, store.path,
@@ -591,6 +608,8 @@ def run_agent(
                             )
                             assessment = read_evidence(store.path, result["review_evidence_id"])["data"]["result"]
                             result["review"] = {key: assessment[key] for key in ("model", "decision", "summary", "test_assessment", "remaining_concerns")}
+                        elif skip_local_reviews:
+                            result["review_status"] = "skipped_by_operator"
                     elif name == "findings.defer":
                         selected_finding(findings, arguments["finding_id"])
                         if set(arguments["evidence_ids"]) - {event["evidence_id"] for event in events}:
@@ -618,7 +637,7 @@ def run_agent(
                     consecutive_errors = 0
                     visible = cve_page(result, arguments.get("offset", 0)) if name == "security.cves" else (inventory_summary(result) if name == "security.inventory" else result)
                     if name == "findings.test":
-                        visible = {**test_observation(result), "verdict_guidance": verdict_guidance(selected_finding(findings, result["finding_id"]), result)}
+                        visible = {**test_observation(result), "verdict_guidance": verdict_guidance(selected_finding(findings, result["finding_id"]), result, require_review=not skip_local_reviews)}
                     text = json.dumps(clean(visible))
                     observation = {"action": action, "untrusted_result": text, "evidence_id": identity}
                     observations.append(observation)
@@ -686,7 +705,9 @@ def run_agent(
                 "kind": "isolated_agent", "run_id": store.run_id, "engagement_id": "isolated-agent", "status": status,
                 "summary": summary, "findings": findings, "coverage_gaps": gaps, "tools": events,
                 "workspace_evidence": snapshot, "code": str(store.path / "code"), "diff": str(store.path / "changes.diff"),
-                "models": {"coordinator": planner, "coder": coder, "security": list(SPECIALISTS.values())},
+                "models": {"coordinator": planner, "coder": coder, "security": [] if skip_local_reviews else list(SPECIALISTS.values())},
+                "local_reviews": policy["local_reviews"],
+                "finding_reviews": policy["finding_reviews"],
                 "coding_profile": coding.model_dump() if coding else None,
                 "context_compactions": compact_events,
                 "provider_retries": provider_retry_events,
@@ -701,6 +722,8 @@ def run_agent(
             }
             write_private(store.path / "report.json", json.dumps(clean(report), indent=2) + "\n")
             lines = ["# Argo isolated agent", "", "Status: " + status, "", summary, "", "## Findings", ""]
+            if skip_local_reviews:
+                lines[4:4] = ["Local reviews: skipped by operator. No Qwen finding/fix approval; runtime test gates remain enforced.", ""]
             for item in findings:
                 lines += [f"### {item['title']}", "", f"{item['status']} · {item['severity']} · {item['asset']}", "", item["explanation"], "", "Remediation: " + item["remediation"], "", "Evidence: " + ", ".join(item["evidence_ids"]), ""]
                 lines += [description(item), ""]

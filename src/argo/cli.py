@@ -36,6 +36,7 @@ def main():
     inputs.add_argument("--project", type=Path, help="Mount this directory read/write (default: current directory)")
     inputs.add_argument("--isolated", action="store_true", help="Use a disposable workspace without a project mount")
     sub.add_argument("--no-mcp", action="store_true")
+    sub.add_argument("--skip-local-reviews", action="store_true", help="Skip local specialists and Qwen approval for this run; retain all runtime test gates")
     sub.add_argument("--test-database", choices=["off", "mongodb"], default="off", help="Start a temporary database on isolated worker loopback")
     sub.add_argument("--intelligence", choices=["offline", "connected"], help="Override saved CVE intelligence mode for this task")
     sub.add_argument("--mcp-profile", type=Path)
@@ -91,6 +92,7 @@ def main():
                 "profile": load_profile(args.mcp_profile) if args.mcp_profile else None,
                 "max_steps": args.max_steps,
                 "test_database": args.test_database,
+                "skip_local_reviews": args.skip_local_reviews,
                 "intelligence_mode": args.intelligence or load_mode(args.state_dir.parent / "intelligence-settings.json"),
                 "on_progress": lambda event: print(json.dumps(event), file=sys.stderr, flush=True),
             }
