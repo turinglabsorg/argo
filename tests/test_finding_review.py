@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 
 import pytest
+from review_helpers import unpack_review
 from test_finding_validation import finding, fixture
 from test_providers import endpoint
 
@@ -100,7 +101,7 @@ def test_large_manifest_review_uses_advertised_context_without_omission(review_c
         assert saved["status"] == "complete"
         assert len(chats) == 1
         assert 32768 < chats[0]["options"]["num_ctx"] < capacity
-        assert json.loads(chats[0]["messages"][-1]["content"])["manifests"]["yarn.lock"] == lockfile
+        assert unpack_review(chats[0]["messages"][-1]["content"])["manifests"]["yarn.lock"] == lockfile
     else:
         assert not chats
         assert saved["status"] == "failed"

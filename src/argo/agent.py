@@ -49,7 +49,7 @@ from argo.mcp import MCPClient, default_profile
 from argo.model_activity import analysis_text
 from argo.project_inventory import inventory
 from argo.provider_usage import summarize_usage
-from argo.providers import model_limits
+from argo.providers import ProviderResponseError, model_limits
 from argo.scanners import read_sources
 from argo.test_database import database_mode
 from argo.workspace import Workspace, project_directory, validate_files, validate_path
@@ -388,7 +388,7 @@ def run_agent(
                 closing = {"role": "user", "content": "Continue with the next action from the latest result. Do not repeat completed work.\nController status:\n" + json.dumps(context)}
                 messages = conversation.prepare(opening, closing, lambda messages, schema: structured(planner, messages, schema, check, tokens=min(8192, limits.context_window // 4), on_retry=lambda event: provider_retry("auto-compact", event), **model_options("auto-compact")), check, compact_progress)
                 progress("coordination", context={"estimated_input_tokens": estimate_tokens(messages), "context_window": limits.context_window, "compactions": conversation.compactions})
-                action, name, arguments = None, None, {}
+                action, name, arguments, recovery = None, None, {}, {}
                 try:
                     decision = structured(planner, messages, schema, check, tokens=None if coding else 2000, on_retry=lambda event: provider_retry("coordination", event), **model_options("coordination"))
                     Draft202012Validator(schema).validate(decision)
@@ -484,8 +484,14 @@ def run_agent(
                         current = workspace.call("export")["files"]
                         context = {path: current.get(path, "") for path in paths}
                         context_paths = arguments.get("context_paths", list(current))
-                        if any(validate_path(path) not in current for path in context_paths):
-                            raise ValueError("Coding context_paths must name existing visible workspace files")
+                        unknown = sorted({validate_path(path) for path in context_paths} - current.keys())
+                        if unknown:
+                            recovery = {
+                                "invalid_context_paths": unknown,
+                                "path_suggestions": {path: difflib.get_close_matches(path, sorted(current), n=3, cutoff=0.5) for path in unknown},
+                                "next_step": "Select exact existing reference paths from workspace.list/read or these suggestions, then submit corrected code.edit arguments. Suggestions are not automatic replacements; verify the intended file. No coding call or write occurred.",
+                            }
+                            raise ValueError("Coding context_paths must name existing visible workspace files: " + ", ".join(unknown)[:240])
                         feedback = {"latest_test": latest_test, "context_summary": conversation.summary}
                         context_budget = limits.input_budget - estimate_tokens([task, arguments, feedback]) - 2048
                         if estimate_tokens(context) > context_budget:
@@ -622,6 +628,18 @@ def run_agent(
                     message = action_validation_error(exc) if isinstance(exc, ValidationError) else redact(str(exc))[:600]
                     consecutive_errors += 1
                     feedback = {"error": message, "consecutive_errors": consecutive_errors, "max_consecutive_errors": MAX_ACTION_ERRORS}
+                    if recovery:
+                        feedback["argument_recovery"] = recovery
+                    if isinstance(exc, (ProviderResponseError, ValidationError)):
+                        feedback["response_recovery"] = {
+                            "required_envelope": {"action": "An exact allowed action name", "parameters": {}},
+                            "allowed_actions": list(catalog),
+                            "next_step": "Return one JSON object with action and parameters, no prose, markdown or source at the top level. Put tool arguments inside parameters and follow the selected tool schema. Correct the rejected response; do not repeat completed tools.",
+                        }
+                        if isinstance(exc, ProviderResponseError) and exc.validation:
+                            feedback["response_recovery"]["validation"] = exc.validation
+                        if name in catalog:
+                            feedback["response_recovery"]["tool_schema"] = catalog[name]
                     if action is not None:
                         feedback["action"] = action
                     if isinstance(arguments, dict) and name in {"findings.test", "findings.verdict", "findings.defer"}:

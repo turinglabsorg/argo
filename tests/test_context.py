@@ -65,6 +65,9 @@ def test_authenticated_child_keeps_safe_error_classification(reply, reasoning, e
         assert result.returncode == 0
         assert json.loads(result.stdout)['code'] == expected
         assert 'synthetic-fixture-key' not in result.stdout + result.stderr
+        if expected == 'invalid_schema':
+            details = json.loads(result.stdout)['validation']
+            assert details == {'schema_path': ['required'], 'constraint': 'required', 'expected': ['ok']}
 
 
 def test_large_model_retains_history_without_fixed_turn_or_character_cutoff():

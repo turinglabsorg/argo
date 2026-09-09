@@ -58,7 +58,7 @@ def review_context_window(model, messages, schema, metadata):
     capacity = advertised if type(advertised) is int and 1024 <= advertised <= 100_000_000 else limits.context_window
     required = math.ceil((estimate_tokens(messages) + estimate_tokens(schema) + limits.output_budgets[-1] + 1024) / 0.9)
     if required > capacity:
-        raise LocalModelError("context", "Complete review exceeds Qwen's advertised context; narrow the finding with complete relevant source/tests or record a blocker.")
+        raise LocalModelError("context", f"Complete review requires approximately {required:,} tokens including output reserve and headroom, exceeding Qwen's advertised context of {capacity:,}; retain complete evidence and record the capacity blocker.")
     return min(capacity, max(limits.context_window, math.ceil(required / 32768) * 32768))
 
 
@@ -100,13 +100,16 @@ def structured(model, messages, schema, check=lambda: None, tokens=4096, profile
     return asyncio.run(local_structured(model, messages, schema, check, tokens, on_text, on_reasoning))
 
 
-async def wait_local(awaitable, check, started, deadline):
+async def wait_local(awaitable, check, started, deadline, idle_timeout=None):
     pending = asyncio.ensure_future(awaitable)
+    waiting = time.monotonic()
     try:
         while True:
             check()
             if time.monotonic() - started > deadline:
                 raise LocalModelError("budget", f"Local review exceeded its {deadline:,}-second deadline.")
+            if idle_timeout is not None and time.monotonic() - waiting > idle_timeout:
+                raise httpx.ReadTimeout("Ollama stopped sending review output")
             done, _ = await asyncio.wait({pending}, timeout=0.2)
             if done:
                 return pending.result()
@@ -119,6 +122,7 @@ async def wait_local(awaitable, check, started, deadline):
 async def local_structured(model, messages, schema, check, tokens, on_text, on_reasoning):
     limits = review_limits(model)
     started = time.monotonic()
+    deadline = limits.deadline
     content, reasoning, received, done, updated = "", "", 0, False, 0.0
     done_reason, previous_text, previous_reasoning = None, "", ""
     payload = {
@@ -126,7 +130,8 @@ async def local_structured(model, messages, schema, check, tokens, on_text, on_r
         "stream": True, "think": False, "keep_alive": "5m",
         "options": {"temperature": limits.temperature, "num_ctx": limits.context_window, "num_predict": tokens or limits.output_budgets[0]},
     }
-    async with httpx.AsyncClient(timeout=httpx.Timeout(limits.read_timeout, connect=3), trust_env=False, follow_redirects=False) as client:
+    timeout = httpx.Timeout(limits.read_timeout, connect=3, read=None if model == QWEN else limits.read_timeout)
+    async with httpx.AsyncClient(timeout=timeout, trust_env=False, follow_redirects=False) as client:
         if model in SPECIALISTS.values():
             check()
             metadata = await wait_local(client.post(ENDPOINT + "/api/show", json={"model": model}, timeout=10), check, started, limits.deadline)
@@ -136,14 +141,17 @@ async def local_structured(model, messages, schema, check, tokens, on_text, on_r
                 raise LocalModelError("metadata", "Ollama returned invalid model capabilities.")
             payload["think"] = "thinking" in metadata.get("capabilities", [])
             payload["options"]["num_ctx"] = review_context_window(model, payload["messages"], schema, metadata)
+            if model == QWEN:
+                deadline = min(14400, limits.deadline * max(1, math.ceil(payload["options"]["num_ctx"] / 65536)))
         request = client.build_request("POST", ENDPOINT + "/api/chat", json=payload)
-        response = await wait_local(client.send(request, stream=True), check, started, limits.deadline)
+        response = await wait_local(client.send(request, stream=True), check, started, deadline)
         try:
             response.raise_for_status()
             lines = response.aiter_lines()
             while True:
                 try:
-                    line = await wait_local(anext(lines), check, started, limits.deadline)
+                    idle = limits.read_timeout if model == QWEN and (content or reasoning) else None
+                    line = await wait_local(anext(lines), check, started, deadline, idle_timeout=idle)
                 except StopAsyncIteration:
                     break
                 check()

@@ -24,7 +24,7 @@ def main():
         result = exchange(CodingProfile.model_validate(data["profile"]), data["operation"], data.get("messages"), data.get("schema"), data.get("tokens", 4096), key=key, session_id=data.get("session_id"), on_usage=usage.append)
         reply = {"result": result}
     except ProviderResponseError as exc:
-        reply = {"error": str(exc), "code": exc.code}
+        reply = {"error": str(exc), "code": exc.code, "validation": exc.validation}
     except ProviderHTTPError as exc:
         reply = {"error": str(exc), "code": "http", "status": exc.status, "retry_after": exc.retry_after, "shared_pool": exc.shared_pool}
     except ProviderTransientError as exc:

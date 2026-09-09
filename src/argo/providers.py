@@ -60,9 +60,17 @@ class ProviderResponseError(ValueError):
         "response_limit": "Provider response exceeded the transport size limit",
     }
 
-    def __init__(self, code):
+    def __init__(self, code, validation=None):
         self.code = code if code in self.MESSAGES else "invalid_format"
+        self.validation = validation
         super().__init__(self.MESSAGES[self.code])
+
+
+def response_validation(error):
+    details = {"schema_path": list(error.absolute_schema_path), "constraint": error.validator}
+    if error.validator in {"type", "required", "enum", "const", "maxLength", "minLength", "maxItems", "minItems", "additionalProperties"}:
+        details["expected"] = error.validator_value
+    return details
 
 
 class CodingProfile(BaseModel):
@@ -158,7 +166,7 @@ def parse_json(content, schema):
     try:
         Draft202012Validator(schema).validate(data)
     except ValidationError as exc:
-        raise ProviderResponseError("invalid_schema") from exc
+        raise ProviderResponseError("invalid_schema", response_validation(exc)) from exc
     return data
 
 
@@ -190,7 +198,7 @@ def request(profile, operation, messages=None, schema=None, tokens=4096, check=l
         if result.get("code") in {"timeout", "connection"}:
             raise ProviderTransientError(result["code"])
         if result.get("code") in ProviderResponseError.MESSAGES:
-            raise ProviderResponseError(result["code"])
+            raise ProviderResponseError(result["code"], result.get("validation"))
         if result.get("code") == "http":
             raise ProviderHTTPError(result["status"], result.get("retry_after"), result.get("shared_pool", False))
         raise RuntimeError(result["error"])
@@ -479,7 +487,7 @@ def generate(profile, messages, schema, check=lambda: None, tokens=None, on_retr
     try:
         Draft202012Validator(schema).validate(result)
     except ValidationError as exc:
-        raise ProviderResponseError("invalid_schema") from exc
+        raise ProviderResponseError("invalid_schema", response_validation(exc)) from exc
     return result
 
 

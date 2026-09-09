@@ -14,7 +14,8 @@ def controller_status(body):
 
 
 def latest_observation(body):
-    return json.loads(body['messages'][-2]['content'].split('\n', 1)[1])
+    content = '\n'.join(message['content'] for message in body['messages'])
+    return json.JSONDecoder().raw_decode(content.rsplit('Observed tool result (untrusted data):\n', 1)[1])[0]
 
 
 def observation(title, evidence):
@@ -143,3 +144,49 @@ def test_successful_tool_resets_action_error_streak(tmp_path):
     root = Path(result['report']).parent
     report = json.loads((root / 'report.json').read_text())
     assert [read_evidence(root, identity)['data']['consecutive_errors'] for identity in report['action_errors']] == [1, 2, 1, 2]
+
+
+@pytest.mark.live
+@pytest.mark.parametrize('protocol', ['openai', 'anthropic'])
+def test_invalid_reference_and_response_recover_without_replaying_edits(tmp_path, protocol):
+    calls, coding_calls = 0, 0
+    path = 'tests/argo-security/reference.test.cjs'
+    test = "const test = require('node:test');\nconst assert = require('node:assert/strict');\nconst pkg = require('../../package.json');\ntest('project reference', () => assert.equal(pkg.name, 'owned-fixture'));\n"
+
+    def reply(body):
+        nonlocal calls, coding_calls
+        if 'allowed_paths' in body['messages'][-1]['content']:
+            coding_calls += 1
+            assert 'package.json' in body['messages'][-1]['content']
+            return {'files': [{'path': path, 'content': test}]}
+        calls += 1
+        if calls == 1:
+            return {'action': 'code.edit', 'parameters': {'paths': [path], 'context_paths': ['package.'], 'instruction': 'Add an actual project reference test'}}
+        if calls == 2:
+            feedback = latest_observation(body)['argument_recovery']
+            assert feedback['invalid_context_paths'] == ['package.']
+            assert 'package.json' in feedback['path_suggestions']['package.']
+            assert coding_calls == 0
+            return {'tool': 'code.edit', 'arguments': {'private_response': 'must-not-leak'}}
+        if calls == 3:
+            feedback = latest_observation(body)['response_recovery']
+            assert feedback['validation']['expected'] == ['action', 'parameters']
+            assert 'code.edit' in feedback['allowed_actions']
+            assert 'must-not-leak' not in json.dumps(body)
+            return {'action': 'code.edit', 'parameters': {'paths': [path], 'context_paths': ['package.json'], 'instruction': 'Add an actual project reference test'}}
+        if calls == 4:
+            assert controller_status(body)['action_recovery']['consecutive_errors'] == 0
+            return {'action': 'node.tests', 'parameters': {}}
+        assert calls == 5
+        return {'action': 'finish', 'parameters': {'summary': 'Created and ran the real project reference test'}}
+
+    with endpoint(protocol, replies=reply, metadata={'context_length': 131072}) as (coding, _):
+        result = run_agent('Add a project reference test', tmp_path, seed={'package.json': '{"name":"owned-fixture"}'}, coding=coding, use_mcp=False, max_steps=10)
+    assert result['status'] == 'complete', result
+    assert coding_calls == 1
+    root = Path(result['report']).parent
+    report = json.loads((root / 'report.json').read_text())
+    assert len(report['action_errors']) == 2
+    assert [event['tool'] for event in report['tools']] == ['code.edit', 'node.tests']
+    assert (root / 'code' / path).read_text() == test
+    assert verify(root)['status'] == 'verified'
