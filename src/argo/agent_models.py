@@ -44,6 +44,8 @@ class ReviewLimits:
 def review_limits(model):
     if model == ANALYST:
         return ReviewLimits(deadline=1200, temperature=0.3)
+    if model == REVIEWER:
+        return ReviewLimits(deadline=1200, read_timeout=240)
     if model == QWEN:
         return ReviewLimits(32768, (8192, 16384), 3600, 600, 0.6, 8 * 1024**2)
     return ReviewLimits()
@@ -347,7 +349,7 @@ def review(model, files, check=lambda: None, on_text=None, on_reasoning=None, on
         completed = sorted(path for path, source in files.items() if path in seen and covered[path] == len(source))
         value = {
             "summary": "\n\n".join(result["summary"] for result in results),
-            "suspected_findings": [finding for result in results for finding in result["suspected_findings"]],
+            "suspected_findings": deduplicate([finding for result in results for finding in result["suspected_findings"]]),
             "source_batches": len(results), "reviewed_segments": segments, "review_retries": recoveries,
             "completed_paths": completed, "unreviewed_paths": sorted(set(files) - set(completed)),
         }
@@ -492,6 +494,29 @@ def review_batches(files, model=ANALYST, intelligence=None):
     if current:
         batches.append(current)
     return batches
+
+
+def restatement(text):
+    """Collapse punctuation and case so a reworded restatement of one issue compares equal."""
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", str(text).lower()).split())
+
+
+def deduplicate(findings):
+    """Drop repeated statements of one issue: identical wording, or the same advisory on one path.
+
+    Findings whose wording and advisories both differ are preserved; judging those equivalent is the
+    coordinator's task, not a string comparison.
+    """
+    seen, unique = set(), []
+    for finding in findings:
+        path = finding.get("path")
+        advisories = frozenset(re.findall(r"CVE-\d{4}-\d{4,7}", str(finding.get("issue", "")), re.I))
+        key = (path, advisories) if advisories else (path, restatement(finding.get("issue")))
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(finding)
+    return unique
 
 
 def review_batch(model, files, check, on_text, on_reasoning=None, on_status=None, intelligence=None, source_ranges=None, profile=None):

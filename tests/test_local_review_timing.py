@@ -15,7 +15,9 @@ from argo.evidence import read_evidence, verify
     (ANALYST, 310, True),
     (ANALYST, 1190, True),
     (ANALYST, 1201, False),
-    (REVIEWER, 301, False),
+    (REVIEWER, 301, True),
+    (REVIEWER, 1190, True),
+    (REVIEWER, 1201, False),
     (QWEN, 1201, True),
 ])
 def test_review_deadline_allows_slow_foundation_but_remains_bounded(monkeypatch, model, elapsed, accepted):

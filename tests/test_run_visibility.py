@@ -258,3 +258,46 @@ def test_large_project_guidance_requires_semantic_slices():
     assert "semantic dependency" in LARGE_PROJECT_GUIDANCE
     assert "configuration, settings" in LARGE_PROJECT_GUIDANCE
     assert "insufficient_context" in LARGE_PROJECT_GUIDANCE
+
+
+def test_every_specialist_reviewer_gets_a_usable_deadline():
+    """VulnLLM produced the best-calibrated analysis yet died on the shortest ceiling."""
+    from argo.agent_models import ANALYST, QWEN, REVIEWER, review_limits
+
+    for model in (ANALYST, REVIEWER, QWEN):
+        assert review_limits(model).deadline >= 1200, model
+    assert review_limits(REVIEWER).read_timeout >= 240
+
+
+def test_repeated_statements_of_one_issue_are_collapsed():
+    from argo.agent_models import deduplicate
+
+    observed = [
+        {"issue": "algorithm confusion in `python-jose` (CVE-2024-33663)", "path": "app/routes/auth.py"},
+        {"issue": "algorithm confusion in python-jose (CVE-2024-33663)", "path": "app/routes/auth.py"},
+        {"issue": "CWE-287: Improper Authentication in python-jose (CVE-2024-33663)", "path": "app/routes/auth.py"},
+    ]
+    assert len(deduplicate(observed)) == 1
+
+
+def test_deduplication_keeps_distinct_paths_and_distinct_advisories():
+    from argo.agent_models import deduplicate
+
+    distinct = [
+        {"issue": "algorithm confusion (CVE-2024-33663)", "path": "app/routes/auth.py"},
+        {"issue": "algorithm confusion (CVE-2024-33663)", "path": "app/dependencies.py"},
+        {"issue": "form parsing DoS (CVE-2026-53539)", "path": "app/routes/auth.py"},
+        {"issue": "missing ownership check", "path": "app/routes/auth.py"},
+    ]
+    assert len(deduplicate(distinct)) == 4
+
+
+def test_deduplication_preserves_findings_it_cannot_prove_equivalent():
+    """Merging differently worded findings without advisories is the coordinator's judgement."""
+    from argo.agent_models import deduplicate
+
+    ambiguous = [
+        {"issue": "algorithm_confusion", "path": "app/routes/auth.py"},
+        {"issue": "insecure algorithm handling", "path": "app/routes/auth.py"},
+    ]
+    assert len(deduplicate(ambiguous)) == 2
