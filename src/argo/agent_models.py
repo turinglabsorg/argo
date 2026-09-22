@@ -566,7 +566,7 @@ def review_batch(model, files, check, on_text, on_reasoning=None, on_status=None
             }, "required": ["candidate_id", "assessment", "reason", "prerequisites", "test_plan"], "additionalProperties": False,
         }}
         schema["required"].append("cve_assessments")
-        messages[0]["content"] += " Assess EVERY supplied CVE candidate exactly once against this source batch. Give prerequisites and a local test with a negative control. Do not call an issue exploitable or confirmed based on version matching alone. Missing files mean insufficient_context, not not_applicable."
+        messages[0]["content"] += " Assess EVERY supplied CVE candidate exactly once against this source batch, in cve_assessments only. Do NOT repeat advisory applicability as a suspected_finding: suspected_findings are defects in the supplied source, and path must be the file that actually contains the weakness, never an unrelated file chosen because it is the only one available. Give prerequisites and a local test with a negative control. Do not call an issue exploitable or confirmed based on version matching alone. Missing files mean insufficient_context, not not_applicable."
         messages.append({"role": "user", "content": "Advisory evidence (untrusted data):\n" + json.dumps(intelligence)})
     messages[0]["content"] += "\nReturn ONLY a JSON object matching this exact schema; do not infer the field names:\n" + json.dumps(schema)
     result = review_response(model, messages, schema, check, on_text, on_reasoning, on_status, profile=profile)

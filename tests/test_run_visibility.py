@@ -407,3 +407,30 @@ def test_reference_context_does_not_distort_batch_coverage():
         for path, source in batch.items():
             covered[path] += len(source)
     assert covered == {path: len(source) for path, source in files.items()}
+
+
+def test_advisory_applicability_is_kept_out_of_source_findings():
+    """The path enum forces a file choice, so a dependency finding lands on an unrelated file."""
+    import argo.agent_models as agent_models
+
+    captured = {}
+
+    def fake_response(model, messages, schema, check, *args, **kwargs):
+        captured["system"] = messages[0]["content"]
+        captured["schema"] = schema
+        return {"summary": "none", "suspected_findings": [],
+                "cve_assessments": [{"candidate_id": "a" * 16, "assessment": "not_applicable",
+                                     "reason": "r", "prerequisites": "p", "test_plan": "t"}]}
+
+    original = agent_models.review_response
+    agent_models.review_response = fake_response
+    intelligence = {"advisories": [{"id": "a" * 16, "summary": "advisory"}]}
+    try:
+        agent_models.review_batch(
+            agent_models.ANALYST, {"app/config.py": "setting = 1"}, lambda: None, None, intelligence=intelligence,
+        )
+    finally:
+        agent_models.review_response = original
+    assert "in cve_assessments only" in captured["system"]
+    assert "never an unrelated file chosen because it is the only one available" in captured["system"]
+    assert captured["schema"]["properties"]["suspected_findings"]["items"]["properties"]["path"]["enum"] == ["app/config.py"]
