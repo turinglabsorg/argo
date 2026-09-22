@@ -333,7 +333,7 @@ def review(model, files, check=lambda: None, on_text=None, on_reasoning=None, on
     if model not in SPECIALISTS.values():
         raise ValueError("Choose a configured local security reviewer")
     settings = review_limits(model)
-    reference = reference_files(files, ModelLimits(context_window=settings.context_window).context_window) if len(files) > 1 else {}
+    reference, unreachable = reference_files(files, ModelLimits(context_window=settings.context_window).context_window) if len(files) > 1 else ({}, [])
     batches = review_batches(files, model, intelligence, reference)
     pending, offsets = [], dict.fromkeys(files, 0)
     for batch in batches:
@@ -354,6 +354,7 @@ def review(model, files, check=lambda: None, on_text=None, on_reasoning=None, on
             "suspected_findings": deduplicate([finding for result in results for finding in result["suspected_findings"]]),
             "source_batches": len(results), "reviewed_segments": segments, "review_retries": recoveries,
             "completed_paths": completed, "unreviewed_paths": sorted(set(files) - set(completed)),
+            "configuration_not_carried": unreachable,
         }
         if intelligence:
             value["cve_assessments"] = [assessment for item in results for assessment in item["cve_assessments"]]
@@ -472,14 +473,19 @@ CONFIGURATION = re.compile(r"(^|[/_])(config|configuration|settings|constants|co
 
 
 def reference_files(files, budget):
-    """Configuration a slice reads decides most questions about it; batching must not strand it."""
+    """Configuration a slice reads decides most questions about it; batching must not strand it.
+
+    Returns the carried files and the configuration too large to carry, which is a real blind spot
+    for the reviewer rather than something to drop silently.
+    """
     candidates = {path: source for path, source in files.items() if CONFIGURATION.search(PurePosixPath(path).stem)}
-    allowance, selected = max(256, budget // 4), {}
+    allowance, selected, omitted = max(256, budget // 2), {}, []
     for path, source in sorted(candidates.items(), key=lambda item: len(item[1])):
         if estimate_tokens({**selected, path: source}) > allowance:
+            omitted.append(path)
             continue
         selected[path] = source
-    return selected
+    return selected, sorted(omitted)
 
 
 def review_batches(files, model=ANALYST, intelligence=None, reference=None):

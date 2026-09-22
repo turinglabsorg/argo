@@ -352,8 +352,9 @@ def test_configuration_travels_with_every_batch_of_its_slice():
         "app/config.py": 'algorithm: str = "HS256"\n' * 5,
         "app/dependencies.py": "def require(): pass\n" * 400,
     }
-    reference = reference_files(files, 16384)
+    reference, omitted = reference_files(files, 16384)
     assert sorted(reference) == ["app/config.py"]
+    assert omitted == []
     batches = review_batches(files, ANALYST, None, reference)
     assert len(batches) > 1
     assert any("app/config.py" not in batch for batch in batches)
@@ -362,9 +363,11 @@ def test_configuration_travels_with_every_batch_of_its_slice():
 def test_reference_selection_is_bounded_and_ignores_ordinary_modules():
     from argo.agent_models import reference_files
 
-    assert reference_files({"app/routes.py": "x = 1\n", "app/models.py": "y = 2\n"}, 16384) == {}
+    assert reference_files({"app/routes.py": "x = 1\n", "app/models.py": "y = 2\n"}, 16384) == ({}, [])
     huge = {"app/config.py": "setting = 1\n" * 200000}
-    assert reference_files(huge, 16384) == {}
+    carried, omitted = reference_files(huge, 16384)
+    assert carried == {}
+    assert omitted == ["app/config.py"]  # a blind spot must be named, not dropped silently
 
 
 def test_reference_context_is_declared_outside_the_review_scope():
@@ -400,7 +403,7 @@ def test_reference_context_does_not_distort_batch_coverage():
         "app/config.py": 'algorithm: str = "HS256"\n' * 5,
         "app/dependencies.py": "def require(): pass\n" * 400,
     }
-    reference = reference_files(files, 16384)
+    reference, _ = reference_files(files, 16384)
     batches = review_batches(files, ANALYST, None, reference)
     covered = {path: 0 for path in files}
     for batch in batches:
@@ -458,3 +461,16 @@ def test_liveness_falls_back_to_staleness_without_a_pid():
     assert run_is_live({"status": "running", "updated_at": "not-a-date"}) is False
     assert run_is_live({"status": "complete", "pid": os.getpid()}) is False
     assert run_is_live(None) is False
+
+
+def test_configuration_too_large_to_carry_is_reported_as_a_blind_spot():
+    """A 14 KB settings module is ordinary; silently skipping it hides what the reviewer cannot see."""
+    from argo.agent_models import reference_files
+
+    files = {"app/config.py": "setting = 1\n" * 4000, "app/auth.py": "from jose import jwt\n"}
+    carried, omitted = reference_files(files, 2000)
+    assert carried == {}
+    assert omitted == ["app/config.py"]
+    generous, none_omitted = reference_files(files, 200000)
+    assert sorted(generous) == ["app/config.py"]
+    assert none_omitted == []
