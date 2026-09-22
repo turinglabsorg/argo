@@ -301,3 +301,43 @@ def test_deduplication_preserves_findings_it_cannot_prove_equivalent():
         {"issue": "insecure algorithm handling", "path": "app/routes/auth.py"},
     ]
     assert len(deduplicate(ambiguous)) == 2
+
+
+def test_slice_selection_is_visible_in_the_action_log(tmp_path):
+    """Following a run must show which files are under review, not just the tool name."""
+    live, run = published(tmp_path)
+    live.record(event("workspace.focus", paths=["app/auth.py", "app/config.py"], path_count=2), status="running")
+    actions, _ = read_actions(run)
+    assert actions[0]["paths"] == ["app/auth.py", "app/config.py"]
+    assert actions[0]["path_count"] == 2
+
+
+def test_a_large_selection_is_bounded_in_the_action_log(tmp_path):
+    live, run = published(tmp_path)
+    selection = [f"app/module_{index:03d}.py" for index in range(400)]
+    live.record(event("workspace.focus", paths=selection[:50], path_count=len(selection)), status="running")
+    actions, _ = read_actions(run)
+    assert len(actions[0]["paths"]) == 50
+    assert actions[0]["path_count"] == 400
+
+
+def test_review_prompt_guards_the_observed_false_positive_classes():
+    """Foundation-Sec reported post-mortem comments and non-existent endpoints as live defects."""
+    import argo.agent_models as agent_models
+
+    captured = {}
+
+    def fake_response(model, messages, schema, check, *args, **kwargs):
+        captured["system"] = messages[0]["content"]
+        return {"summary": "none", "suspected_findings": []}
+
+    original = agent_models.review_response
+    agent_models.review_response = fake_response
+    try:
+        agent_models.review_batch(agent_models.ANALYST, {"app.py": "value = 1"}, lambda: None, None)
+    finally:
+        agent_models.review_response = original
+    system = captured["system"]
+    assert "history, not a current defect" in system
+    assert "this file does not contain" in system
+    assert "Judge the code as written" in system

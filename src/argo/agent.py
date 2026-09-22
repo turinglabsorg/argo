@@ -516,7 +516,9 @@ def run_agent(
                     Draft202012Validator(catalog[name]).validate(arguments)
                     action = {"tool": name, "arguments": arguments}
                     if name != "security.review":
-                        progress(name, coder if name == "code.edit" else planner)
+                        selection = arguments.get("paths") if name in {"workspace.focus", "code.edit", "security.review_all"} else None
+                        details = {"paths": selection[:50], "path_count": len(selection)} if selection else {}
+                        progress(name, coder if name == "code.edit" else planner, **details)
                     if name == "finish":
                         final_files = snapshot()
                         if invalidate(findings, final_files, workspace.call("manifests")["files"]):
