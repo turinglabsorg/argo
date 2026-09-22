@@ -341,3 +341,69 @@ def test_review_prompt_guards_the_observed_false_positive_classes():
     assert "history, not a current defect" in system
     assert "this file does not contain" in system
     assert "Judge the code as written" in system
+
+
+def test_configuration_travels_with_every_batch_of_its_slice():
+    """Slicing put config beside its consumers; batching must not strand it again."""
+    from argo.agent_models import ANALYST, reference_files, review_batches
+
+    files = {
+        "app/auth.py": "from jose import jwt\n" * 400,
+        "app/config.py": 'algorithm: str = "HS256"\n' * 5,
+        "app/dependencies.py": "def require(): pass\n" * 400,
+    }
+    reference = reference_files(files, 16384)
+    assert sorted(reference) == ["app/config.py"]
+    batches = review_batches(files, ANALYST, None, reference)
+    assert len(batches) > 1
+    assert any("app/config.py" not in batch for batch in batches)
+
+
+def test_reference_selection_is_bounded_and_ignores_ordinary_modules():
+    from argo.agent_models import reference_files
+
+    assert reference_files({"app/routes.py": "x = 1\n", "app/models.py": "y = 2\n"}, 16384) == {}
+    huge = {"app/config.py": "setting = 1\n" * 200000}
+    assert reference_files(huge, 16384) == {}
+
+
+def test_reference_context_is_declared_outside_the_review_scope():
+    import argo.agent_models as agent_models
+
+    captured = {}
+
+    def fake_response(model, messages, schema, check, *args, **kwargs):
+        captured["messages"] = messages
+        return {"summary": "none", "suspected_findings": []}
+
+    original = agent_models.review_response
+    agent_models.review_response = fake_response
+    try:
+        agent_models.review_batch(
+            agent_models.ANALYST, {"app/auth.py": "value = 1"}, lambda: None, None,
+            reference={"app/config.py": 'algorithm = "HS256"'},
+        )
+    finally:
+        agent_models.review_response = original
+    body = " ".join(message["content"] for message in captured["messages"])
+    assert "HS256" in body
+    assert "NOT the code under review in this batch" in body
+    assert "instead of answering insufficient_context" in body
+
+
+def test_reference_context_does_not_distort_batch_coverage():
+    """Reference copies are context, not reviewed content; coverage must still close."""
+    from argo.agent_models import ANALYST, reference_files, review_batches
+
+    files = {
+        "app/auth.py": "from jose import jwt\n" * 400,
+        "app/config.py": 'algorithm: str = "HS256"\n' * 5,
+        "app/dependencies.py": "def require(): pass\n" * 400,
+    }
+    reference = reference_files(files, 16384)
+    batches = review_batches(files, ANALYST, None, reference)
+    covered = {path: 0 for path in files}
+    for batch in batches:
+        for path, source in batch.items():
+            covered[path] += len(source)
+    assert covered == {path: len(source) for path, source in files.items()}
