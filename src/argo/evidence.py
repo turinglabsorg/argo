@@ -7,6 +7,7 @@ import stat
 import tempfile
 import time
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 from argo.contracts import utc_now
@@ -196,7 +197,7 @@ class LiveProgress:
         self.actions = path / "actions.jsonl"
         self.written = 0
         self.flushed = float("-inf")
-        self.snapshot = {"run_id": run_id, "status": "starting", "stage": None, "step": None, "models": {}, "actions": 0}
+        self.snapshot = {"run_id": run_id, "status": "starting", "pid": os.getpid(), "stage": None, "step": None, "models": {}, "actions": 0}
 
     def record(self, event, status=None):
         model = event.get("model")
@@ -281,3 +282,29 @@ def read_actions(path: Path, offset: int = 0):
             except ValueError:
                 continue
     return events, offset
+
+
+STALE_AFTER = 1800
+
+
+def run_is_live(snapshot):
+    """A killed run never closes its snapshot, so a follower must not trust `running` alone."""
+    if not isinstance(snapshot, dict) or snapshot.get("status") != "running":
+        return False
+    pid = snapshot.get("pid")
+    if isinstance(pid, int) and pid > 0:
+        try:
+            os.kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+    stamp = snapshot.get("updated_at")
+    if not isinstance(stamp, str):
+        return False
+    try:
+        age = (datetime.now(timezone.utc) - datetime.fromisoformat(stamp)).total_seconds()
+    except ValueError:
+        return False
+    return age <= STALE_AFTER

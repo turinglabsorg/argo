@@ -434,3 +434,27 @@ def test_advisory_applicability_is_kept_out_of_source_findings():
     assert "in cve_assessments only" in captured["system"]
     assert "never an unrelated file chosen because it is the only one available" in captured["system"]
     assert captured["schema"]["properties"]["suspected_findings"]["items"]["properties"]["path"]["enum"] == ["app/config.py"]
+
+
+def test_a_killed_run_is_not_reported_as_live(tmp_path):
+    """Teardown kills the process before close(), so `running` alone cannot be trusted."""
+    from argo.evidence import run_is_live
+
+    live, run = published(tmp_path)
+    live.record(event("step 3/712"), status="running")
+    snapshot = read_live(run)
+    assert snapshot["status"] == "running"
+    assert snapshot["pid"] == os.getpid()
+    assert run_is_live(snapshot) is True
+    assert run_is_live({**snapshot, "pid": 999_999}) is False
+
+
+def test_liveness_falls_back_to_staleness_without_a_pid():
+    from argo.contracts import utc_now
+    from argo.evidence import run_is_live
+
+    assert run_is_live({"status": "running", "updated_at": utc_now()}) is True
+    assert run_is_live({"status": "running", "updated_at": "2020-01-01T00:00:00+00:00"}) is False
+    assert run_is_live({"status": "running", "updated_at": "not-a-date"}) is False
+    assert run_is_live({"status": "complete", "pid": os.getpid()}) is False
+    assert run_is_live(None) is False

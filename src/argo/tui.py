@@ -33,7 +33,7 @@ from argo.config import resolve
 from argo.context_budget import ModelLimits
 from argo.contracts import Actions, Engagement, Scope
 from argo.controller import Cancelled, run
-from argo.evidence import clean, read_actions, read_evidence, read_live, read_state
+from argo.evidence import clean, read_actions, read_evidence, read_live, read_state, run_is_live
 from argo.finding_validation import description, state
 from argo.mcp import default_profile, load_profile
 from argo.model_activity import review_text
@@ -1084,7 +1084,7 @@ class ArgoApp(App):
             if not path.is_dir() or path.is_symlink():
                 continue
             live = read_live(path)
-            if live and live.get("status") == "running":
+            if run_is_live(live):
                 found.append((live.get("updated_at", ""), path, live))
         return sorted(found, reverse=True)
 
@@ -1121,10 +1121,9 @@ class ArgoApp(App):
                 live = read_live(path)
                 if live:
                     self.call_from_thread(self.follow_status, live)
-                    if live.get("status") != "running":
-                        self.call_from_thread(
-                            self.say, "ARGO", "Run " + path.name + " finished with status: " + str(live.get("status"))
-                        )
+                    if not run_is_live(live):
+                        ended = live.get("status") if live.get("status") != "running" else "stopped without closing its report"
+                        self.call_from_thread(self.say, "ARGO", "Run " + path.name + " ended: " + str(ended))
                         self.call_from_thread(self.finish)
                         return
             except (OSError, ValueError):
