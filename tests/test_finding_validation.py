@@ -83,7 +83,7 @@ def test_controller_creates_runs_and_interprets_real_controls(tmp_path, monkeypa
 
     assessment = {"decision": "agree", "summary": "The runtime evidence supports the proposed scoped verdict", "test_assessment": "Real application behavior with positive/negative controls", "remaining_concerns": []}
     with endpoint("ollama", replies=lambda _: assessment) as (local, _), endpoint("openai", replies=respond) as (coding, _):
-        monkeypatch.setattr("argo.agent_models.ENDPOINT", local.base_url)
+        monkeypatch.setattr("argo.inference.ENDPOINT", local.base_url)
         result = run_agent("Assess the suspected cross-owner bug, create and execute tests; do not fix source", tmp_path / "runs", seed=source, coding=coding, use_mcp=False, on_progress=progress, max_steps=8)
     assert result["status"] == "complete", result
     path = Path(result["report"]).parent

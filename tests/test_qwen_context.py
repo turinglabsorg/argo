@@ -20,7 +20,7 @@ def test_complete_before_and_after_context_fits_or_fails_without_truncation(monk
         "unrelated.context_length": 100_000_000,
     }}
     with endpoint("ollama", metadata=metadata) as (local, requests):
-        monkeypatch.setattr("argo.agent_models.ENDPOINT", local.base_url)
+        monkeypatch.setattr("argo.inference.ENDPOINT", local.base_url)
         if type(advertised) is int and advertised == 262144:
             assert review_response(QWEN, messages, schema, lambda: None) == {"ok": True}
         else:

@@ -18,7 +18,7 @@ def test_local_review_streams_user_facing_fields_and_batches_long_source(monkeyp
     result = {'summary': 'Review complete', 'suspected_findings': [{'path': 'app.py', 'issue': 'Unbound SQL value', 'remediation': 'Bind query parameters'}]}
     metadata = {'capabilities': ['completion', 'thinking'], 'model_info': {'general.architecture': 'qwen35', 'qwen35.context_length': 262144}} if model == QWEN else None
     with endpoint('ollama', replies=[result] * 10, metadata=metadata) as (profile, records):
-        monkeypatch.setattr('argo.agent_models.ENDPOINT', profile.base_url)
+        monkeypatch.setattr('argo.inference.ENDPOINT', profile.base_url)
         updates = []
         source = 'value = 1\n' * 6000
         output = review(model, {'app.py': source}, on_text=updates.append)
@@ -58,7 +58,7 @@ def test_native_reasoning_arrives_before_the_answer(monkeypatch):
         received.set()
 
     with endpoint('ollama', chunks=chunks) as (profile, _):
-        monkeypatch.setattr('argo.agent_models.ENDPOINT', profile.base_url)
+        monkeypatch.setattr('argo.inference.ENDPOINT', profile.base_url)
         result = review(ANALYST, {'app.py': 'value = 1'}, on_text=answers.append, on_reasoning=thinking)
     assert result['summary'] == 'Review complete'
     assert thoughts and '\x1b' not in thoughts[0]
@@ -72,7 +72,7 @@ def test_truncated_review_retries_only_inference_with_more_output(monkeypatch, m
         truncated = body['options']['num_predict'] == 4096
         return [{'message': {'content': '{"summary":' if truncated else json.dumps(final)}, 'done': True, 'done_reason': 'length' if truncated else 'stop'}]
     with endpoint('ollama', chunks=chunks, metadata={'capabilities': ['completion']}) as (profile, records):
-        monkeypatch.setattr('argo.agent_models.ENDPOINT', profile.base_url)
+        monkeypatch.setattr('argo.inference.ENDPOINT', profile.base_url)
         statuses = []
         assert review(model, {'app.py': 'value = 1'}, on_status=statuses.append)['summary'] == 'Reviewed'
     requests = [record['body'] for record in records if record['path'] == '/api/chat']
@@ -93,7 +93,7 @@ def test_truncated_review_retries_only_inference_with_more_output(monkeypatch, m
 ])
 def test_local_review_classifies_failure_without_raw_error_disclosure(monkeypatch, chunks, category):
     with endpoint('ollama', chunks=chunks) as (profile, records):
-        monkeypatch.setattr('argo.agent_models.ENDPOINT', profile.base_url)
+        monkeypatch.setattr('argo.inference.ENDPOINT', profile.base_url)
         with pytest.raises(LocalModelError) as raised:
             review(ANALYST, {'app.py': 'value = 1'})
     assert raised.value.category == category
@@ -111,7 +111,7 @@ def test_cancellation_during_native_reasoning(monkeypatch):
             raise Cancelled('Cancelled')
     chunks = [{'message': {'thinking': 'Checking access'}}, {'message': {'content': '{}'}, 'done': True}]
     with endpoint('ollama', chunks=chunks) as (profile, _):
-        monkeypatch.setattr('argo.agent_models.ENDPOINT', profile.base_url)
+        monkeypatch.setattr('argo.inference.ENDPOINT', profile.base_url)
         with pytest.raises(Cancelled):
             review(ANALYST, {'app.py': 'value = 1'}, check, on_reasoning=thinking)
 
@@ -137,7 +137,7 @@ def test_slow_qwen_can_be_cancelled_without_waiting_for_a_token(monkeypatch, pha
             raise Cancelled('Cancelled while waiting for Ollama')
 
     with endpoint('ollama', replies=replies, chunks=chunks) as (profile, _):
-        monkeypatch.setattr('argo.agent_models.ENDPOINT', profile.base_url)
+        monkeypatch.setattr('argo.inference.ENDPOINT', profile.base_url)
         try:
             with pytest.raises(Cancelled, match='waiting for Ollama'):
                 review(QWEN, {'app.py': 'value = 1'}, check)
@@ -156,7 +156,7 @@ def test_qwen_reserves_context_for_longer_reasoning_and_retries_only_truncation(
         yield {'message': {'content': json.dumps(final)}, 'done': True, 'done_reason': 'length' if truncated else 'stop'}
 
     with endpoint('ollama', chunks=chunks) as (profile, records):
-        monkeypatch.setattr('argo.agent_models.ENDPOINT', profile.base_url)
+        monkeypatch.setattr('argo.inference.ENDPOINT', profile.base_url)
         statuses = []
         result = review(QWEN, {'app.py': 'value = 1'}, on_status=statuses.append)
     requests = [r['body'] for r in records if r['path'] == '/api/chat']
@@ -173,7 +173,7 @@ def test_qwen_transport_accepts_longer_reasoning_without_expanding_other_models(
     chunks = [{'message': {'thinking': 'a' * (2 * 1024**2)}, 'done': False}, {'message': {'content': json.dumps(final)}, 'done': True}]
     thinking = []
     with endpoint('ollama', chunks=chunks) as (profile, _):
-        monkeypatch.setattr('argo.agent_models.ENDPOINT', profile.base_url)
+        monkeypatch.setattr('argo.inference.ENDPOINT', profile.base_url)
         if accepted:
             assert review(model, {'app.py': 'value = 1'}, on_reasoning=thinking.append)['summary'] == 'Reviewed'
             assert max(map(len, thinking)) <= 16000
@@ -204,7 +204,7 @@ def test_review_team_starts_three_requests_and_isolates_one_failure(monkeypatch)
         completed.append(value)
 
     with endpoint('ollama', chunks=chunks) as (profile, records):
-        monkeypatch.setattr('argo.agent_models.ENDPOINT', profile.base_url)
+        monkeypatch.setattr('argo.inference.ENDPOINT', profile.base_url)
         results = review_team({'app.py': 'value = 1'}, on_progress=progress, on_result=result)
     assert [r['model'] for r in results] == list(SPECIALISTS.values())
     assert len(completed) == 3 and len([r for r in records if r['path'] == '/api/chat']) == 3
@@ -232,7 +232,7 @@ def test_review_team_cancels_silent_workers_and_keeps_completed_results(monkeypa
         completed.set()
 
     with endpoint('ollama', chunks=chunks) as (profile, _):
-        monkeypatch.setattr('argo.agent_models.ENDPOINT', profile.base_url)
+        monkeypatch.setattr('argo.inference.ENDPOINT', profile.base_url)
         try:
             with pytest.raises(Cancelled, match='remaining reviews'):
                 review_team({'app.py': 'value = 1'}, check, on_result=result)

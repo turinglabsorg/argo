@@ -8,11 +8,11 @@ from pathlib import Path
 from argo.advisories import load_mode
 from argo.agent import import_sources, restore, run_agent
 from argo.agent_models import MODELS
+from argo.config import ConfigError, apply, resolve
 from argo.contracts import Actions, Engagement, Scope
 from argo.controller import run
 from argo.evidence import read_state, redact, verify
 from argo.mcp import MCPClient, default_profile, load_profile
-from argo.providers import load_settings
 from argo.scope import ScopeError, authorize, digest, load, normalize, save
 from argo.services import CYBER_MODELS, DEFAULT_STATE, demo, doctor, run_path
 from argo.tui import ArgoApp
@@ -37,6 +37,7 @@ def main():
     inputs.add_argument("--isolated", action="store_true", help="Use a disposable workspace without a project mount")
     sub.add_argument("--no-mcp", action="store_true")
     sub.add_argument("--skip-local-reviews", action="store_true", help="Skip local specialists and Qwen approval for this run; retain all runtime test gates")
+    sub.add_argument("--audit", action="store_true", help="Findings and report only; dedicated tests allowed, production source is read-only")
     sub.add_argument("--test-database", choices=["off", "mongodb"], default="off", help="Start a temporary database on isolated worker loopback")
     sub.add_argument("--intelligence", choices=["offline", "connected"], help="Override saved CVE intelligence mode for this task")
     sub.add_argument("--mcp-profile", type=Path)
@@ -85,6 +86,7 @@ def main():
             parser.print_help()
             return 0
         if args.command == "doctor":
+            apply(resolve())
             output = doctor()
         elif args.command == "agent":
             options = {
@@ -93,13 +95,12 @@ def main():
                 "max_steps": args.max_steps,
                 "test_database": args.test_database,
                 "skip_local_reviews": args.skip_local_reviews,
+                "audit_only": args.audit,
                 "intelligence_mode": args.intelligence or load_mode(args.state_dir.parent / "intelligence-settings.json"),
                 "on_progress": lambda event: print(json.dumps(event), file=sys.stderr, flush=True),
             }
             if args.planner:
                 options["planner"] = args.planner
-            else:
-                options["coding"] = load_settings().coding
             seed = import_sources(args.source) if args.source else (restore(run_path(args.state_dir, args.previous)) if args.previous else {})
             project = None if args.source or args.previous or args.isolated else (args.project or Path.cwd())
             output = run_agent(args.task, args.state_dir, seed=seed, project=project, **options)
@@ -160,7 +161,7 @@ def main():
         return 1 if output.get("status") in {"failed", "cancelled", "incomplete"} else 0
     except Exception as exc:
         message = (
-            str(exc) if isinstance(exc, (FileNotFoundError, RuntimeError, ScopeError)) else type(exc).__name__
+            str(exc) if isinstance(exc, (FileNotFoundError, RuntimeError, ScopeError, ConfigError)) else type(exc).__name__
         )
         print(
             json.dumps(

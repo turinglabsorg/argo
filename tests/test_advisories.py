@@ -187,7 +187,7 @@ def test_all_reviewers_receive_verified_advisory_context(tmp_path, monkeypatch):
         return assessment(body)
 
     with endpoint("ollama", replies=reply) as (profile, _):
-        monkeypatch.setattr("argo.agent_models.ENDPOINT", profile.base_url)
+        monkeypatch.setattr("argo.inference.ENDPOINT", profile.base_url)
         result = review_team({"auth.cjs": SOURCE}, intelligence=context)
     assert {r["model"] for r in result} == set(SPECIALISTS.values())
     assert all(r["status"] == "complete" and r["cve_assessments"] for r in result)
@@ -231,7 +231,7 @@ def test_coordinator_cve_lookup_review_runtime_evidence_and_saved_findings(tmp_p
                 test_evidence = path.stem
 
     with intelligence_server(monkeypatch), endpoint("ollama", replies=assessment) as (local, _), endpoint("openai", replies=coding_reply, metadata={"context_length": 131072}) as (coding, _):
-        monkeypatch.setattr("argo.agent_models.ENDPOINT", local.base_url)
+        monkeypatch.setattr("argo.inference.ENDPOINT", local.base_url)
         result = run_agent("Audit this Node project and check CVE applicability", tmp_path / "runs", seed={"package-lock.json": LOCK, "auth.cjs": SOURCE, "tests/argo-security/controls.test.cjs": "const test = require('node:test'); const assert = require('node:assert/strict'); test('owned negative control', () => assert.equal(1,1));"}, coding=coding, use_mcp=False, intelligence_mode="connected", on_progress=progress, max_steps=5)
     path = Path(result["report"]).parent
     report = json.loads((path / "report.json").read_text())

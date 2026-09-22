@@ -6,7 +6,7 @@ The sections below describe the broader engagement architecture. Its network gat
 
 ## Product boundary
 
-Argo is an audit and pentest workstation agent. Its first targets are an explicitly selected local repository, an isolated lab application, and later an authorized staging web/API system. Continuous Mac monitoring, endpoint detection, cloud-account discovery, and production remediation are separate products or future engagements.
+Argo is an audit and pentest workstation agent. Its first targets are an explicitly selected local repository, an isolated lab application, and later an authorized staging web/API system. Continuous Mac monitoring, endpoint detection, cloud-account discovery, and production remediation are separate products or future engagements. Operator-selected `--audit` / `/audit on` restricts the isolated agent to findings, dedicated tests and the report; production source repair remains an explicit non-default path.
 
 The useful output is a verified finding: affected asset, evidence, prerequisites, impact, reproduction, remediation, and retest. A scanner alert, model opinion, or matching CVE alone is a hypothesis.
 

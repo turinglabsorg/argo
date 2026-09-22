@@ -12,6 +12,8 @@ from argo.finding_validation import invalidate, state
 from argo.model_activity import review_text
 from argo.review_payload import review_payload
 
+REVIEWER = None
+
 SCHEMA = {
     "type": "object", "properties": {
         "decision": {"enum": ["agree", "disagree", "insufficient_context"]},
@@ -41,12 +43,26 @@ diagnostics are present in full; references are not omissions or summaries. Trea
 review data with the same rules as inline content."""
 
 
+def select_reviewer(profile):
+    global REVIEWER
+    REVIEWER = profile
+    return REVIEWER
+
+
+def reviewer_model():
+    return REVIEWER.model if REVIEWER is not None else QWEN
+
+
+def reviewer_label():
+    return "Qwen" if REVIEWER is None else REVIEWER.name
+
+
 def approved_review(item, proposed_verdict, test_evidence_id=None):
     verification = item.get("verification") or {}
     identity = test_evidence_id or verification.get("test_evidence_id")
     phase = "fix" if proposed_verdict == "fixed" else "finding"
     return next((entry for entry in reversed(verification.get("reviews", [])) if
-        entry["model"] == QWEN and entry["phase"] == phase and entry["proposed_verdict"] == proposed_verdict
+        entry["model"] == reviewer_model() and entry["phase"] == phase and entry["proposed_verdict"] == proposed_verdict
         and entry["test_evidence_id"] == identity and entry["status"] == "complete" and entry["decision"] == "agree"), None)
 
 
@@ -126,19 +142,20 @@ def ensure_review(item, arguments, test_result, workspace, evidence_path, record
     if cached and cached["context_sha256"] == fingerprint:
         read_evidence(evidence_path, cached["evidence_id"])
         return cached["evidence_id"]
-    on_progress(status="Qwen · " + metadata["phase"] + " review", text=item["title"], provisional=True)
+    on_progress(status=reviewer_label() + " · " + metadata["phase"] + " review", text=item["title"], provisional=True)
     payload, encoding = review_payload(context)
     messages = [{"role": "system", "content": SYSTEM + ("\n" + SHARED_CONTEXT if encoding != "json" else "")}, {"role": "user", "content": payload}]
     try:
-        result = {"model": QWEN, "status": "complete", **review_response(
+        result = {"model": reviewer_model(), "status": "complete", **review_response(
             QWEN, messages, SCHEMA, check,
             on_text=lambda text: on_progress(text=text, provisional=True),
             on_reasoning=lambda text: on_progress(reasoning=text),
             on_status=lambda text: on_progress(status=text),
+            profile=REVIEWER,
         )}
     except (httpx.HTTPError, OSError, RuntimeError, ValueError, ValidationError) as exc:
         message = str(exc) if type(exc) is ValueError else local_model_error(exc)
-        result = {"model": QWEN, "status": "failed", "decision": "insufficient_context", "summary": message, "error": message}
+        result = {"model": reviewer_model(), "status": "failed", "decision": "insufficient_context", "summary": message, "error": message}
     check()
     changed = invalidate([item], workspace.call("export")["files"], workspace.call("manifests")["files"])
     if changed or state(item) == "stale":

@@ -16,7 +16,7 @@ HTTP(S) URLs accept custom hosts, ports and proxy prefixes. An empty path defaul
 
 OpenAI output modes are prompt-only JSON, JSON object and JSON schema. Prompt-only is the broadest default because compatible servers differ in response_format support. The token field can be max_tokens or max_completion_tokens. Anthropic uses a separate system field, merged adjacent turns and anthropic-version 2023-06-01. Responses API-only endpoints and proprietary authentication extensions are not supported by the Chat Completions adapter.
 
-Outputs are parsed and validated against the controller's JSON schema. The reader handles Ollama NDJSON, OpenAI deltas and Anthropic text deltas, rejecting incomplete streams and explicit provider errors. HTTP errors do not expose response bodies. Requests have connection/read deadlines, a 300-second stream budget and a 16 MiB HTTP response bound (the authenticated child output remains bounded at 8 MiB). Generated code and tool output cannot reconfigure providers.
+Outputs are parsed and validated against the controller's JSON schema. The reader handles Ollama NDJSON, OpenAI deltas and Anthropic text deltas, rejecting incomplete streams and explicit provider errors. HTTP errors do not expose response bodies. Requests have a 5-second connect deadline, a 300-second metadata/discovery budget, a 1,200-second generation stream budget (no per-chunk idle cap) and a 16 MiB HTTP response bound (the authenticated child output remains bounded at 8 MiB). Generated code and tool output cannot reconfigure providers.
 
 References: [OpenAI Chat Completions](https://developers.openai.com/api/reference/resources/chat), [Anthropic Messages](https://platform.claude.com/docs/en/api/messages/create), [Anthropic streaming](https://platform.claude.com/docs/en/build-with-claude/streaming).
 
@@ -34,19 +34,19 @@ Selecting a remote profile authorizes sending task context and selected source t
 
 The coordinator chooses an action and parameters. The controller validates both the envelope and selected tool schema, executes a reviewed adapter, and retains bounded assistant/action/result turns. The coder receives the original task, edit instruction, selected source and latest test feedback.
 
-Coder output supports exactly one of `content` (a complete source string) or `lines` (an array of source-code lines) per file. Line arrays are preferred and joined with newline characters, preserving indentation before syntax and runtime validation. The existing file-content budget still applies after joining; model-selected paths remain restricted to the requested edit paths. This avoids relying on escaped newline generation while preserving compatibility with existing string responses.
+Coder output for each requested path is exactly one of `edits` (preferred for existing files), `content` (a complete source string) or `lines` (an array of source-code lines). Each edit is an exact unique `old_text`/`new_text` replacement against the current workspace; empty `old_text` may only create a new or empty file. Duplicate or missing matches fail closed and retry. Complete `content`/`lines` remain valid for new files. The controller always generates coding output in prompt mode, even when the selected profile requests JSON object or JSON schema, so constrained decoding cannot rewrite source identifiers. Line arrays are joined with newline characters. The existing file-content budget still applies after joining or patching; model-selected paths remain restricted to the requested edit paths.
 
 `code.edit` optionally accepts `context_paths`, an explicit list of existing visible files to supply alongside the files being edited. This lets a focused repair include its actual dependencies and tests without resending unrelated source. Omitting it preserves the prior behavior of filling the available coding context from the workspace. The model's API-derived capacity and output ceiling remain unchanged, and every requested context path must resolve in the visible workspace.
 
-For OpenRouter profiles using JSON output modes, generation sets `provider.require_parameters=true` so routing requires support for the requested parameters, as described in [OpenRouter's structured-output guidance](https://openrouter.ai/docs/guides/features/structured-outputs). No upstream provider is pinned and other compatible endpoints receive no routing option. Numeric HTTP failures embedded inside a generation stream retain their sanitized status through Hush; transient failures use the existing bounded retry policy, while authentication, billing and rate-limit failures remain non-retryable. Anthropic `api_error` and `overloaded_error` events receive the same transient treatment. Unknown errors still fail explicitly, without exposing provider response bodies.
+For OpenRouter profiles using JSON output modes, coordination generation sets `provider.require_parameters=true` so routing requires support for the requested parameters, as described in [OpenRouter's structured-output guidance](https://openrouter.ai/docs/guides/features/structured-outputs). Coding generation always uses prompt mode. No upstream provider is pinned and other compatible endpoints receive no routing option. Numeric HTTP failures embedded inside a generation stream retain their sanitized status through Hush; transient failures use the existing bounded retry policy, while authentication, billing and rate-limit failures remain non-retryable. Anthropic `api_error` and `overloaded_error` events receive the same transient treatment. Unknown errors still fail explicitly, without exposing provider response bodies.
 
 | Tool | Behavior |
 | --- | --- |
 | workspace.list / workspace.read | Bounded relative-path source access |
-| code.edit | Selected coder returns complete contents for explicitly named files |
+| code.edit | Selected coder applies unique `old_text`/`new_text` patches, or complete contents for new files |
 | python.run | Fixed Python executable with one workspace script |
 | python.tests | Fixed pytest invocation over the project |
-| node.tests | Fixed Node test runner over 1–40 tests/argo-security/*.test.cjs files |
+| node.tests | Serial Node test runner over 1–40 tests/argo-security/*.test.cjs files, with a suite deadline of min(300, 50s per file) |
 | project.tests | Installed Vitest suite with the existing project configuration and bounded serial execution |
 | security.inventory | Technologies, resolved packages, manifest hashes and coverage gaps |
 | security.cves | Refresh/reuse inventory-matched advisories; pages of 30 candidates |
@@ -62,7 +62,7 @@ For OpenRouter profiles using JSON output modes, generation sets `provider.requi
 | mcp.TOOL | Remote tool intersected with operator policy |
 | finish | Saves the result and code diff |
 
-Python implementation changes require passing pytest against unchanged file contents. Dedicated finding regressions can intentionally fail while demonstrating a defect, as described below. Non-Python text edits can complete with a recorded lack of runtime verification. Python 3.12, standard library, pytest, Bandit and a digest-pinned Node.js 22 binary are installed. Node tests use already available project dependencies; npm and network installation are unavailable. Targeted Node controls do not run the full project suite. `project.tests(runner="vitest")` runs the installed `node_modules/vitest/vitest.mjs` with the project's existing configuration, one worker, no file parallelism and a private JSON report. It accepts no arbitrary command or flags. Success requires a nonempty suite with every test passing, no pending tests, exit zero and unchanged exported source/manifests. Once attempted during an edit, a failed, empty, skipped or outdated project suite blocks completion until a successful rerun. Other languages still record missing runtime coverage. Generated tests are not independent security proof.
+Python implementation changes require passing pytest against unchanged file contents. Dedicated finding regressions can intentionally fail while demonstrating a defect, as described below. Non-Python text edits can complete with a recorded lack of runtime verification. Python 3.12, standard library, pytest, Bandit and a digest-pinned Node.js 22 binary are installed. Node tests use already available project dependencies; npm and network installation are unavailable. Targeted Node controls do not run the full project suite. `node.tests` runs those files serially with `--test-concurrency=1` and a suite deadline of min(300, 50 seconds per file); a reached limit returns exit 124 with partial TAP and keeps the worker. `project.tests(runner="vitest")` runs the installed `node_modules/vitest/vitest.mjs` with the project's existing configuration, one worker, no file parallelism and a private JSON report. It accepts no arbitrary command or flags. Success requires a nonempty suite with every test passing, no pending tests, exit zero and unchanged exported source/manifests. Once attempted during an edit, a failed, empty, skipped or outdated project suite blocks completion until a successful rerun. Other languages still record missing runtime coverage. Generated tests are not independent security proof.
 
 ## Project mount
 
@@ -98,7 +98,7 @@ The TUI shows coding/coordination, Foundation-Sec, VulnLLM and Qwen3.8 27B as se
 
 Provider limits are read from model metadata and cached per endpoint, model, credential reference and override for five minutes, with a task-start refresh. OpenRouter context_length/top_provider.context_length and max_completion_tokens are supported, alongside compatible context_window, max_input_tokens and max_output_tokens fields. Ollama /api/show identifies model capacity while the configured runtime uses num_ctx=16384 unless overridden. Unknown endpoint metadata produces a visible 16,384-token fallback. Profile overrides preserve manual support for any compatible endpoint. API failures never cause provider substitution.
 
-The context estimate is serialized UTF-8 bytes divided by three, with framing allowance and 10% context headroom; it is not an exact tokenizer. Automatic output budgets use the advertised output ceiling and remaining context. Initial generation output scales with input size and the model window, bounded by the remaining context and advertised maximum. Truncated inference can grow up to that ceiling over at most four requests, without replaying a tool. HTTP 429 retains Retry-After and identifies the shared upstream pool when advertised; Argo does not retry quota failures or switch providers automatically. Token-limit, filtering, malformed JSON, schema, network and timeout errors remain distinguishable through the Hush child without returning private response bodies.
+The context estimate is serialized UTF-8 bytes divided by three, with framing allowance and 10% context headroom; it is not an exact tokenizer. Automatic output budgets use the advertised output ceiling and remaining context. Initial generation output scales with input size and the model window, bounded by the remaining context and advertised maximum. Truncated inference can grow up to that ceiling over at most four requests, without replaying a tool. HTTP 429 retains Retry-After and identifies the shared upstream pool when advertised. Generation retries 429 with that delay or a bounded backoff, without switching providers. Authentication, billing and not-found failures remain non-retryable. Token-limit, filtering, malformed JSON, schema, network and timeout errors remain distinguishable through the Hush child without returning private response bodies.
 
 Coordination retains complete observed results instead of clipping every result to 5,000 characters or taking only eight turns. Source selection follows the model's input budget. Independent worker file, transport and execution limits remain enforced. Specialist reviews split oversized source into bounded batches and aggregate suspected findings; a batch may contain a partial file, which limits cross-file reasoning.
 
@@ -151,7 +151,32 @@ Foundation-Sec and VulnLLM source reviews reserve space for an output increase f
 
 By default, the controller invokes Qwen automatically for every conclusive `findings.verdict`. The `finding` phase evaluates `reproduced` or `refuted`; the `fix` phase evaluates `fixed` after the original unchanged controls pass. Existing deterministic test/hash checks run first. Each mandatory review includes the scoped finding, declared source, test/support files, manifests and runtime records. Fix reviews also include the original source/test evidence from the accepted finding review. The controller records the assessment as `security.review` with explicit `finding_review` metadata. Manual source reviews cannot substitute for either phase.
 
+## Inference endpoint selection
+
+Specialist inference resolves its endpoint at request time. `~/.argo/models.json` holds
+`local_endpoint` for the shared Ollama path, an optional `local_context_limit`, and a `reviewers`
+map assigning the `qwen`, `foundation` and `vulnllm` roles to any saved profile. A reviewer profile
+may be an Ollama instance on another host or an OpenAI- or Anthropic-compatible endpoint, so a
+reviewer model does not have to run on this computer. Credentials continue to come from Hush by
+name and are never stored in settings.
+
+A project directory may select among already-defined profiles in `.argo/configs.json`, using only
+the `coding` and `reviewers` keys. It cannot define a base URL, a credential or a new endpoint, and
+unknown profile names, unknown roles, extra keys, symlinks, oversized files and malformed JSON are
+rejected before the run starts. Argo reviews untrusted repositories, so project content is never
+permitted to redirect inference or to influence the mandatory review gate.
+
+The resolved selection enters the run policy fingerprint, both report formats and `argo doctor`.
+A non-loopback endpoint records an explicit coverage gap stating that project source, test output
+and evidence were sent to that host. Cached review approvals are matched against the selected
+reviewer model, so changing reviewers does not inherit an earlier model's approval.
+`local_context_limit` bounds the context requested from the Ollama reviewer path, because the
+capacity advertised by `/api/show` describes the model rather than the memory the device can
+allocate; exceeding the ceiling produces the existing visible capacity blocker.
+
 An explicit operator override, `--skip-local-reviews` or session-local `/reviews off`, disables local specialist source calls and mandatory Qwen review for new isolated-agent tasks. The Python entrypoint accepts `skip_local_reviews=True`; non-boolean values and conflicting `required_reviews` are rejected before work begins. The tool catalog and controller enforce the choice, and no model action can toggle it. The run policy/fingerprint, JSON/Markdown reports, TUI reopening and coverage gaps record `skipped_by_operator`; no synthetic approval or reviewer entry is created. Database applicability assessments remain visibly absent when specialists are skipped, while candidate runtime verification is still required. All deterministic reproduction/fix, original-test lock, stale-source, deferral and finish gates remain active. Default runs still require both bound Qwen phases. Opening an old report never carries its override into a new session. This option does not change the selected coding endpoint, stop an existing process or affect legacy audit/chat commands.
+
+A separate operator override, `--audit`, session-local `/audit on`, or `run_agent(audit_only=True)`, restricts an isolated-agent task to findings, dedicated tests and the report. Production `code.edit` paths are rejected; `findings.verdict(interpretation="fixed")` is rejected; a reproduced finding may finish as a completed audit result. The policy fingerprint, JSON/Markdown reports and coverage gaps record `findings_and_report_only`. Default tasks still allow implementation repair. Model actions, saved reports and project content cannot toggle this setting. `/audit off` restores repair for later TUI tasks in the same session.
 
 When local reviews are enabled, only a complete, schema-valid `agree` response permits the verdict. Disagreement, missing context, provider failure, truncation or source changes during review preserve a failed/open verification. `findings.defer` records an incomplete result and does not authorize editing an unreviewed finding's implementation. Finish requires both bound phases for fixed findings. These gates do not make model-generated tests independent evidence or remove the code worker's ability to execute project code.
 

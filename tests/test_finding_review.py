@@ -63,7 +63,7 @@ def review_case(tmp_path):
 def test_bound_review_reuse_and_stale_source_denial(review_case, monkeypatch):
     snapshot, store, records, updates, run = review_case
     with endpoint("ollama", replies=lambda _: ASSESSMENT) as (local, requests):
-        monkeypatch.setattr("argo.agent_models.ENDPOINT", local.base_url)
+        monkeypatch.setattr("argo.inference.ENDPOINT", local.base_url)
         identity = run()
         assert run() == identity
         assert len([r for r in requests if r["path"] == "/api/chat"]) == 1
@@ -88,7 +88,7 @@ def test_large_manifest_review_uses_advertised_context_without_omission(review_c
         "general.architecture": "qwen35", "qwen35.context_length": capacity,
     }}
     with endpoint("ollama", replies=lambda _: ASSESSMENT, metadata=metadata) as (local, requests):
-        monkeypatch.setattr("argo.agent_models.ENDPOINT", local.base_url)
+        monkeypatch.setattr("argo.inference.ENDPOINT", local.base_url)
         if accepted:
             run()
         else:
@@ -112,7 +112,7 @@ def test_large_manifest_review_uses_advertised_context_without_omission(review_c
 def test_review_binding_never_reuses_a_different_snapshot(review_case, monkeypatch, change):
     snapshot, _, records, _, run = review_case
     with endpoint("ollama", replies=lambda _: ASSESSMENT) as (local, _):
-        monkeypatch.setattr("argo.agent_models.ENDPOINT", local.base_url)
+        monkeypatch.setattr("argo.inference.ENDPOINT", local.base_url)
         first = run()
         if change == "test_id":
             snapshot.args["test_evidence_id"] = "c" * 64
@@ -142,7 +142,7 @@ def test_failed_reviews_are_durable_and_cannot_approve(review_case, monkeypatch,
         snapshot.result["source_hashes"] = hashes(snapshot.files)
         apply_result(snapshot.item, "findings.test", snapshot.result, "b" * 64)
     with endpoint("ollama", replies=reply, status=401 if failure == "http" else 200, chunks=chunks) as (local, requests):
-        monkeypatch.setattr("argo.agent_models.ENDPOINT", local.base_url)
+        monkeypatch.setattr("argo.inference.ENDPOINT", local.base_url)
         with pytest.raises(ValueError, match="did not approve"):
             run()
     result = read_evidence(store.path, records[0])["data"]["result"]
@@ -163,7 +163,7 @@ def test_cancellation_does_not_authorize_a_verdict(review_case, monkeypatch, whe
         return ASSESSMENT
 
     with endpoint("ollama", replies=reply) as (local, _):
-        monkeypatch.setattr("argo.agent_models.ENDPOINT", local.base_url)
+        monkeypatch.setattr("argo.inference.ENDPOINT", local.base_url)
 
         def cancelled():
             if stop:
@@ -252,7 +252,7 @@ def test_controller_cannot_skip_or_defer_its_way_past_review(tmp_path, monkeypat
         return {"malformed": True} if decision == "failed" else {**ASSESSMENT, "decision": decision, "summary": "Additional behavioral evidence needed", "remaining_concerns": ["Exercise the relevant dependency"]}
 
     with endpoint("ollama", replies=reviewer) as (local, _), endpoint("openai", replies=coordinator, metadata={"context_length": 131072}) as (coding, _):
-        monkeypatch.setattr("argo.agent_models.ENDPOINT", local.base_url)
+        monkeypatch.setattr("argo.inference.ENDPOINT", local.base_url)
         result = run_agent("Assess and repair the owned fixture only after review", tmp_path / "runs", seed={**source, **tests}, coding=coding, use_mcp=False, on_progress=progress, max_steps=16)
     root = Path(result["report"]).parent
     report = json.loads((root / "report.json").read_text())

@@ -81,7 +81,7 @@ def test_controller_persists_complete_repair_and_rejects_premature_finish(tmp_pa
 
     assessment = {'decision': 'agree', 'summary': 'The real ownership tests support this scoped verdict', 'test_assessment': 'Both controls cover valid and absent identities; regression exercises cross-owner input', 'remaining_concerns': []}
     with endpoint('ollama', replies=lambda _: assessment) as (local, requests), endpoint('openai', replies=reply, metadata={'context_length': 131072}) as (coding, _):
-        monkeypatch.setattr('argo.agent_models.ENDPOINT', local.base_url)
+        monkeypatch.setattr('argo.inference.ENDPOINT', local.base_url)
         result = run_agent('Reproduce and fix cross-owner access', tmp_path / 'runs', seed=source, coding=coding, use_mcp=False, max_steps=14, on_progress=progress)
     assert result['status'] == 'complete', result
     root = Path(result['report']).parent

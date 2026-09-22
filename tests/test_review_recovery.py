@@ -28,7 +28,7 @@ def test_split_retry_preserves_every_character_and_does_not_repeat_completed_fil
         return answer(body, truncated=len(current) > 1)
 
     with endpoint('ollama', chunks=chunks) as (profile, records):
-        monkeypatch.setattr('argo.agent_models.ENDPOINT', profile.base_url)
+        monkeypatch.setattr('argo.inference.ENDPOINT', profile.base_url)
         result = review(ANALYST, files)
     requests = [r['body'] for r in records if r['path'] == '/api/chat']
     successful = [sources(body) for body in requests if len(sources(body)) == 1]
@@ -47,7 +47,7 @@ def test_single_file_split_carries_line_ranges_and_reconstructs_original_source(
         return answer(body, truncated=len(sources(body)['app.ts']) > len(source) // 2 + 30)
 
     with endpoint('ollama', chunks=chunks) as (profile, records):
-        monkeypatch.setattr('argo.agent_models.ENDPOINT', profile.base_url)
+        monkeypatch.setattr('argo.inference.ENDPOINT', profile.base_url)
         result = review(ANALYST, {'app.ts': source})
     requests = [r['body'] for r in records if r['path'] == '/api/chat']
     assert len(requests) == 4
@@ -65,7 +65,7 @@ def test_single_file_split_carries_line_ranges_and_reconstructs_original_source(
 def test_permanent_truncation_stops_at_bounded_split_depth(monkeypatch):
     statuses = []
     with endpoint('ollama', chunks=lambda body: answer(body, truncated=True)) as (profile, records):
-        monkeypatch.setattr('argo.agent_models.ENDPOINT', profile.base_url)
+        monkeypatch.setattr('argo.inference.ENDPOINT', profile.base_url)
         with pytest.raises(LocalModelError, match='8,192') as raised:
             review(ANALYST, {'app.ts': 'const value = 1;\n' * 400}, on_status=statuses.append)
     assert len([r for r in records if r['path'] == '/api/chat']) == 6
@@ -111,7 +111,7 @@ def test_cancellation_stops_before_split_retry(monkeypatch):
             raise Cancelled('Stop before recovery request')
 
     with endpoint('ollama', chunks=lambda body: answer(body, truncated=True)) as (profile, records):
-        monkeypatch.setattr('argo.agent_models.ENDPOINT', profile.base_url)
+        monkeypatch.setattr('argo.inference.ENDPOINT', profile.base_url)
         with pytest.raises(Cancelled):
             review(ANALYST, {'app.ts': 'const value = 1;\n' * 100}, check, on_status=status)
     assert len([r for r in records if r['path'] == '/api/chat']) == 2
@@ -131,7 +131,7 @@ def test_controller_persists_partial_review_without_accepting_missing_coverage(t
         {'action': 'finish', 'parameters': {'summary': 'Must not count the failed review as complete'}},
     ]
     with endpoint('ollama', chunks=chunks) as (local, _), endpoint('openai', replies=actions) as (coding, _):
-        monkeypatch.setattr('argo.agent_models.ENDPOINT', local.base_url)
+        monkeypatch.setattr('argo.inference.ENDPOINT', local.base_url)
         output = run_agent('Review both files', tmp_path, seed={'good.ts': 'const good = 1;', 'bad.ts': 'const bad = 2;'}, coding=coding, use_mcp=False, required_reviews=(ANALYST,), max_steps=2)
     assert output['status'] == 'incomplete'
     path = Path(output['report']).parent

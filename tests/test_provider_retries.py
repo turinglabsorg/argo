@@ -154,15 +154,43 @@ def test_anthropic_typed_stream_failures_recover_without_disclosing_messages(mon
     assert 'private upstream response' not in str(updates)
 
 
-@pytest.mark.parametrize("status", [400, 401, 402, 403, 404, 429])
+@pytest.mark.parametrize("status", [400, 401, 402, 403, 404])
 @pytest.mark.parametrize("failure", ["http", "error_event"])
-def test_auth_billing_rate_limit_and_bad_requests_do_not_retry(monkeypatch, status, failure):
+def test_auth_billing_and_bad_requests_do_not_retry(monkeypatch, status, failure):
     immediate_retries(monkeypatch)
     events = []
     with flaky_endpoint(failure_calls=range(1, 10), failure=failure, error_status=status) as (profile, records):
         with pytest.raises(providers.ProviderHTTPError):
             generate(profile, [], SCHEMA, on_retry=events.append)
     assert len(records) == 1 and not events
+
+
+@pytest.mark.parametrize("failure", ["http", "error_event"])
+def test_http_429_retries_identical_generation_without_switching(monkeypatch, failure):
+    immediate_retries(monkeypatch)
+    events = []
+    with flaky_endpoint(failure_calls=[1], failure=failure, error_status=429) as (profile, records):
+        assert generate(profile, [{"role": "user", "content": "Original task"}], SCHEMA, on_retry=events.append) == {"ok": True}
+    assert len(records) == 2 and records[0] == records[1]
+    assert events[0]["retry"] == 1 and events[0]["delay_seconds"] == 8
+    assert events[-1]["phase"] == "recovered"
+    assert "private provider details" not in str(events)
+
+
+def test_http_429_uses_retry_after_and_stays_capped(monkeypatch):
+    waits = []
+    monkeypatch.setattr(providers, "retry_wait", lambda seconds, check: waits.append(seconds) or check())
+    with flaky_endpoint(failure_calls=[1], failure="http", error_status=429) as (profile, records):
+        original = providers.http_error
+
+        def with_retry_after(response):
+            error = original(response)
+            error.retry_after = 45
+            return error
+
+        monkeypatch.setattr(providers, "http_error", with_retry_after)
+        assert generate(profile, [], SCHEMA) == {"ok": True}
+    assert waits == [45] and len(records) == 2
 
 
 def test_cancel_during_backoff_does_not_retry_or_wait_for_delay():
@@ -192,6 +220,9 @@ def test_task_deadline_and_response_size_are_not_provider_timeout_retries(monkey
         providers.budget(lambda: None, time.monotonic(), 16 * 1024**2 + 1)
     with pytest.raises(ProviderTransientError, match="timed out"):
         providers.budget(lambda: None, time.monotonic() - 301, 1)
+    providers.budget(lambda: None, time.monotonic() - 301, 1, providers.PROVIDER_GENERATION_DEADLINE)
+    with pytest.raises(ProviderTransientError, match="timed out"):
+        providers.budget(lambda: None, time.monotonic() - 1201, 1, providers.PROVIDER_GENERATION_DEADLINE)
 
 
 @pytest.mark.parametrize("failure", ["timeout", "connection"])

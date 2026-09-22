@@ -6,7 +6,7 @@ from collections.abc import Callable
 import httpx
 
 from argo.evidence import clean, redact
-from argo.inference import ENDPOINT, local_models
+from argo.inference import connect_timeout, endpoint, local_models
 from argo.services import CYBER_MODELS
 
 CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]")
@@ -77,11 +77,11 @@ def answer(
     else:
         payload.update({"messages": messages, "think": False})
     with httpx.Client(
-        timeout=httpx.Timeout(30, connect=3), trust_env=False, follow_redirects=False
+        timeout=httpx.Timeout(30, connect=connect_timeout()), trust_env=False, follow_redirects=False
     ) as client:
         with client.stream(
             "POST",
-            ENDPOINT + ("/api/generate" if foundation else "/api/chat"),
+            endpoint() + ("/api/generate" if foundation else "/api/chat"),
             json=payload,
         ) as response:
             response.raise_for_status()

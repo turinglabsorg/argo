@@ -1,5 +1,6 @@
 """Immutable workspace adapter. This file executes only inside the worker image."""
 
+import hashlib
 import json
 import os
 import re
@@ -18,6 +19,7 @@ ROOT = "/workspace"
 MAX_FILE = 96 * 1024
 MAX_TOTAL = 2 * 1024 * 1024
 MAX_FILES = 1000 if os.environ.get("ARGO_PROJECT_MOUNT") == "1" else 100
+MAX_MAP_FILES = 20000
 EXCLUDED = {"__pycache__", "node_modules", "vendor", "dist", "build", "target", "venv"}
 MANIFESTS = {"package.json", "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml", "bun.lock", "requirements.txt", "pyproject.toml", "uv.lock", "poetry.lock", "Dockerfile", "docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"}
 
@@ -96,23 +98,70 @@ def write_file(name, content):
         os.close(directory)
 
 
-def files():
-    result, size = {}, 0
+def walk_paths():
     for directory, folders, names in os.walk(ROOT, followlinks=False):
         folders[:] = sorted(p for p in folders if not p.startswith(".") and p not in EXCLUDED)
         for name in sorted(names):
             if name.startswith(".") or name.endswith(".pyc"):
                 continue
-            path = os.path.relpath(os.path.join(directory, name), ROOT)
-            try:
-                content = read_file(path)
-            except (ValueError, OSError, UnicodeError):
-                continue
+            yield os.path.relpath(os.path.join(directory, name), ROOT)
+
+
+def files(selection=None):
+    if selection is not None:
+        chosen = list(dict.fromkeys(selection))
+        if len(chosen) > MAX_FILES:
+            raise ValueError("Working-set selection exceeds the file budget of " + str(MAX_FILES))
+        result, size = {}, 0
+        for path in chosen:
+            parts(path)
+            content = read_file(path)
             size += len(content.encode())
-            if len(result) >= MAX_FILES or size > MAX_TOTAL:
-                raise ValueError("Workspace export budget exceeded")
+            if size > MAX_TOTAL:
+                raise ValueError("Working-set selection exceeds the " + str(MAX_TOTAL // 1024) + " KiB content budget")
             result[path] = content
+        return result
+    result, size = {}, 0
+    for path in walk_paths():
+        try:
+            content = read_file(path)
+        except (ValueError, OSError, UnicodeError):
+            continue
+        size += len(content.encode())
+        if len(result) >= MAX_FILES or size > MAX_TOTAL:
+            raise ValueError("Workspace export budget exceeded")
+        result[path] = content
     return result
+
+
+def file_map():
+    entries, total, truncated = [], 0, False
+    for path in walk_paths():
+        directory, leaf = parent(path)
+        try:
+            descriptor = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+            with os.fdopen(descriptor, "rb") as source:
+                info = os.fstat(source.fileno())
+                if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                    continue
+                digest = hashlib.sha256()
+                readable = 0
+                while True:
+                    block = source.read(65536)
+                    if not block:
+                        break
+                    digest.update(block)
+                    readable += len(block)
+        except (OSError, ValueError):
+            continue
+        finally:
+            os.close(directory)
+        if len(entries) >= MAX_MAP_FILES:
+            truncated = True
+            break
+        entries.append({"path": path, "bytes": readable, "sha256": digest.hexdigest(), "reviewable": readable <= MAX_FILE})
+        total += readable
+    return {"files": entries, "file_count": len(entries), "total_bytes": total, "truncated": truncated, "working_set_budget": {"max_files": MAX_FILES, "max_bytes": MAX_TOTAL}}
 
 
 def execute(argv, timeout=50, capture_limits=False):
@@ -238,7 +287,7 @@ def finding_test(path):
             except (OSError, ValueError, KeyError, TypeError):
                 pass
     elif path.endswith(".test.cjs"):
-        result = execute(["node", "--test", "--test-reporter=tap", ROOT + "/" + path], capture_limits=True)
+        result = execute(["node", "--test", "--test-concurrency=1", "--test-reporter=tap", ROOT + "/" + path], capture_limits=True)
         counts = {name: int(value) for name, value in re.findall(r"^# (tests|pass|fail|cancelled|skipped|todo) (\d+)\s*$", result["stdout"], re.M)}
         explicit_tests = re.findall(r"^# Subtest: (.+)$", result["stdout"], re.M)
         explicit_tests = [name for name in explicit_tests if name != ROOT + "/" + path]
@@ -264,8 +313,10 @@ def dispatch(request):
     action = request["action"]
     if action == "list":
         return {"files": [{"path": name, "bytes": len(content.encode())} for name, content in files().items()]}
+    if action == "map":
+        return file_map()
     if action == "export":
-        return {"files": files()}
+        return {"files": files(request.get("paths"))}
     if action == "read":
         return {"path": request["path"], "content": read_file(request["path"])}
     if action == "manifests":
@@ -320,7 +371,7 @@ def dispatch(request):
         selected = sorted(name for name in files() if name.startswith("tests/argo-security/") and name.endswith(".test.cjs"))
         if not selected or len(selected) > 40:
             raise ValueError("Create 1–40 Node tests at tests/argo-security/NAME.test.cjs using node:test and node:assert/strict")
-        return execute(["node", "--test", "--test-reporter=tap", *[ROOT + "/" + name for name in selected]])
+        return execute(["node", "--test", "--test-concurrency=1", "--test-reporter=tap", *[ROOT + "/" + name for name in selected]], timeout=min(300, 50 * len(selected)), capture_limits=True)
     if action == "bandit":
         return execute([sys.executable, "-m", "bandit", "-r", ROOT, "-f", "json", "-x", "/workspace/tests", "-q"])
     raise ValueError("Unknown workspace action")

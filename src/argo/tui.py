@@ -29,6 +29,7 @@ from argo.agent import import_sources, restore, run_agent
 from argo.agent_findings import load_agent_findings
 from argo.agent_models import ANALYST, QWEN, REVIEWER, SPECIALISTS
 from argo.chat import answer, display_text
+from argo.config import resolve
 from argo.context_budget import ModelLimits
 from argo.contracts import Actions, Engagement, Scope
 from argo.controller import Cancelled, run
@@ -47,6 +48,7 @@ COMMANDS = [
     "/workspace",
     "/test-db",
     "/reviews",
+    "/audit",
     "/isolated",
     "/agent",
     "/models",
@@ -80,6 +82,7 @@ All models         /models or F3 (roles, activity and live responses)
 Mounted project    /workspace [PATH]
 Test database      /test-db [mongodb | off]
 Local reviews      /reviews [on | off] (this session)
+Audit only         /audit [on | off] (this session; findings and report, no production edits)
 Disposable mode    /isolated
 Import project     /import /path/to/project
 Fresh workspace    /reset
@@ -103,8 +106,9 @@ Chat model         /model foundation | vulnllm
 Service readiness  /doctor
 Cancel work        /stop or Escape
 
-Plain text starts the agent in an offline Docker container. It can create and change code,
-run Python, pytest and Bandit, and consult approved MCP tools through a separate broker.
+Plain text starts the agent in an offline Docker container. It records findings, can author
+dedicated tests, and may repair production source unless /audit on. It runs Python, pytest
+and Bandit, and consults approved MCP tools through a separate broker.
 The launch directory is mounted read/write: changes go directly into your project.
 /isolated selects a disposable workspace. /import copies sources into that mode.
 /model chooses the coding endpoint and model. /diff shows changes already made.
@@ -302,9 +306,11 @@ class ArgoApp(App):
         self.agent_mcp = True
         self.test_database = "off"
         self.skip_local_reviews = False
+        self.audit_only = False
         self.project = Path.cwd().resolve() if project is ... else project
         self.settings_path = settings_path
         self.coding = load_settings(settings_path).coding
+        self.inference = None
         self.model_activity = {}
         self.model_messages = {}
         self.active_model = None
@@ -376,6 +382,7 @@ class ArgoApp(App):
             self.open_case(self.engagement_path)
         self.refresh_runs()
         self.refresh_case()
+        self.announce_inference()
         self.refresh_models()
         self.check_services()
         self.check_model_limits(self.coding)
@@ -465,8 +472,31 @@ class ArgoApp(App):
         self.ui("#model-summary", Static).update(display_text("\n\n".join(rows)))
         self.ui("#model-roster", Static).update(display_text("  " + "  /  ".join(self.model_label(model) for _, model, _ in self.model_roles())))
 
+    def selected_inference(self):
+        try:
+            self.inference = resolve(self.project, self.settings_path)
+        except Exception as exc:
+            self.inference = None
+            self.say("ERROR", "Project configuration ignored: " + display_text(str(exc)))
+        return self.inference
+
+    def announce_inference(self):
+        selected = self.selected_inference()
+        if selected is None:
+            return
+        if selected.sources.get("project"):
+            self.say("ARGO", "Project configuration applied: " + selected.sources["project"])
+        for note in selected.gaps():
+            self.say("ARGO", note)
+
+    def reviewer_model(self, role, default):
+        selected = self.inference
+        profile = selected.reviewers.get(role) if selected else None
+        return profile.model if profile else default
+
     def model_roles(self):
-        return [("coding", self.coding.model, "Coding & coordination"), ("foundation", ANALYST, "Security analysis"), ("vulnllm", REVIEWER, "Vulnerability review"), ("qwen", QWEN, "Finding & fix review · experimental")]
+        coding = self.inference.coding.model if self.inference else self.coding.model
+        return [("coding", coding, "Coding & coordination"), ("foundation", self.reviewer_model("foundation", ANALYST), "Security analysis"), ("vulnllm", self.reviewer_model("vulnllm", REVIEWER), "Vulnerability review"), ("qwen", self.reviewer_model("qwen", QWEN), "Finding & fix review · experimental")]
 
     def model_label(self, model):
         return {ANALYST: "Foundation-Sec 8B", REVIEWER: "VulnLLM-R 7B", QWEN: "Qwen3.8 27B", "meta/muse-spark-1.3-contributor": "Muse Spark 1.3 Contributor"}.get(model, model.rsplit("/", 1)[-1])
@@ -571,6 +601,7 @@ class ArgoApp(App):
                     self.agent_seed = {}
                 self.refresh_case()
                 self.say("ARGO", f"Mounted read/write for the next task: {self.project}" if self.project else "Disposable workspace. /workspace PATH selects a project.")
+                self.announce_inference()
             elif command == "/test-db" and len(args) <= 1:
                 if args:
                     if args[0] not in {"off", "mongodb"}:
@@ -583,6 +614,12 @@ class ArgoApp(App):
                         raise ValueError("Use /reviews on or /reviews off")
                     self.skip_local_reviews = args[0] == "off"
                 self.say("ARGO", "Local reviews: " + ("off · Qwen skipped; runtime tests remain required" if self.skip_local_reviews else "on · Qwen finding/fix review required"))
+            elif command == "/audit" and len(args) <= 1:
+                if args:
+                    if args[0] not in {"on", "off"}:
+                        raise ValueError("Use /audit on or /audit off")
+                    self.audit_only = args[0] == "on"
+                self.say("ARGO", "Audit: " + ("on · findings and report; production source is read-only" if self.audit_only else "off · production repairs remain available"))
             elif command == "/isolated" and not args:
                 self.project = None
                 self.agent_seed = {}
@@ -859,10 +896,11 @@ class ArgoApp(App):
         try:
             options = {
                 "profile": self.agent_profile, "use_mcp": self.agent_mcp,
-                "coding": self.coding.model_copy(deep=True),
+                "config": resolve(self.project),
                 "intelligence_mode": load_mode(self.intelligence_path),
                 "test_database": self.test_database,
                 "skip_local_reviews": self.skip_local_reviews,
+                "audit_only": self.audit_only,
                 "cancelled": self.cancel_event.is_set,
                 "on_progress": lambda data: self.call_from_thread(self.progress, data),
             }

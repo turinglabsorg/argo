@@ -25,6 +25,20 @@ def validate_path(name):
     return name
 
 
+def validate_map(result):
+    if not isinstance(result, dict) or not isinstance(result.get("files"), list) or len(result["files"]) > 20000:
+        raise ValueError("Invalid workspace map")
+    for entry in result["files"]:
+        if not isinstance(entry, dict):
+            raise ValueError("Invalid workspace map entry")
+        validate_path(entry.get("path"))
+        if not isinstance(entry.get("bytes"), int) or entry["bytes"] < 0:
+            raise ValueError("Invalid workspace map size")
+        if not re.fullmatch(r"[a-f0-9]{64}", str(entry.get("sha256"))):
+            raise ValueError("Invalid workspace map digest")
+    return result
+
+
 def validate_files(files, max_files=100):
     if not isinstance(files, dict) or len(files) > max_files:
         raise ValueError("Workspace file count exceeded")
@@ -151,7 +165,7 @@ class Workspace:
             environment = ["--env", "ARGO_TEST_MONGODB_URI=" + MONGODB_URI] if self.database else []
             code, output, _ = command(
                 ["docker", "exec", "-i", *environment, self.name, "python", "-I", "/opt/argo/worker.py"],
-                330 if action == "project_tests" else 60, self.check, json.dumps({"action": action, **arguments}).encode(),
+                330 if action in {"project_tests", "node_tests"} else 60, self.check, json.dumps({"action": action, **arguments}).encode(),
             )
         except BaseException:
             self.close()
@@ -163,6 +177,8 @@ class Workspace:
             raise
         if action == "export":
             validate_files(result["files"], max_files=1000 if self.project else 100)
+        if action == "map":
+            validate_map(result)
         return result
 
     def close(self):

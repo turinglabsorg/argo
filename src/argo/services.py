@@ -7,7 +7,7 @@ from pathlib import Path
 
 from argo.contracts import Actions, Engagement, Scope, utc_now
 from argo.controller import run
-from argo.inference import local_models
+from argo.inference import endpoint, local_models, loopback_endpoint
 from argo.lab import create_fixture, lab_server
 from argo.scope import authorize, normalize
 from argo.workspace import worker_image
@@ -28,13 +28,15 @@ def run_path(root, identity):
 def doctor():
     result = {
         "executables": {name: shutil.which(name) for name in ("python3", "docker", "ollama")},
-        "ollama": {"status": "unavailable"},
+        "ollama": {"status": "unavailable", "endpoint": endpoint()},
         "docker": {"status": "unavailable"},
         "worker": {"status": "not installed"},
     }
     try:
         result["ollama"] = {
             "status": "ready",
+            "endpoint": endpoint(),
+            "scope": "loopback" if loopback_endpoint() else "remote_host",
             "local_models": [{"name": m["name"], "digest": m["digest"]} for m in local_models()],
         }
     except Exception:

@@ -29,7 +29,7 @@ def test_review_deadline_allows_slow_foundation_but_remains_bounded(monkeypatch,
         clock.value = 10.0 + elapsed
 
     with endpoint('ollama', chunks=chunks) as (profile, records):
-        monkeypatch.setattr('argo.agent_models.ENDPOINT', profile.base_url)
+        monkeypatch.setattr('argo.inference.ENDPOINT', profile.base_url)
         if accepted:
             assert review(model, {'app.py': 'value = 1'}, on_reasoning=progress)['summary'] == 'Reviewed'
         else:
@@ -52,7 +52,7 @@ def test_foundation_can_still_be_cancelled_after_the_old_deadline(monkeypatch):
             raise Cancelled('Operator stopped review')
 
     with endpoint('ollama', chunks=[{'message': {'thinking': 'Checking source'}, 'done': False}]) as (profile, _):
-        monkeypatch.setattr('argo.agent_models.ENDPOINT', profile.base_url)
+        monkeypatch.setattr('argo.inference.ENDPOINT', profile.base_url)
         with pytest.raises(Cancelled, match='Operator stopped'):
             review(ANALYST, {'app.py': 'value = 1'}, check, on_reasoning=progress)
 
@@ -71,7 +71,7 @@ def test_long_foundation_review_completes_through_controller_and_saves_evidence(
         {'action': 'finish', 'parameters': {'summary': 'Review complete'}},
     ]
     with endpoint('ollama', replies=response) as (local, _), endpoint('openai', replies=actions) as (coding, _):
-        monkeypatch.setattr('argo.agent_models.ENDPOINT', local.base_url)
+        monkeypatch.setattr('argo.inference.ENDPOINT', local.base_url)
         result = run_agent('Review source without edits', tmp_path, seed={'app.py': 'value = 1'},
                            coding=coding, use_mcp=False, required_reviews=(ANALYST,), max_steps=2)
     assert result['status'] == 'complete'
@@ -107,7 +107,7 @@ def test_required_review_budget_covers_source_reading_before_inference(tmp_path,
         }})
     actions.append({'action': 'finish', 'parameters': {'summary': 'The owned source was read and reviewed.'}})
     with endpoint('ollama', replies=[{'summary': 'Reviewed', 'suspected_findings': []}]) as (local, records), endpoint('openai', replies=actions) as (coding, _):
-        monkeypatch.setattr('argo.agent_models.ENDPOINT', local.base_url)
+        monkeypatch.setattr('argo.inference.ENDPOINT', local.base_url)
         result = run_agent('Audit source after a long initial inventory', tmp_path, seed={'app.py': 'value = 1'},
                            coding=coding, use_mcp=False, required_reviews=required, max_steps=4, on_progress=progress,
                            intelligence_mode=mode)
@@ -115,4 +115,30 @@ def test_required_review_budget_covers_source_reading_before_inference(tmp_path,
     if not accepted:
         assert result['summary'] == 'Agent task deadline exceeded'
     assert len([record for record in records if record['path'] == '/api/chat']) == int(accepted and bool(required))
+    assert verify(Path(result['report']).parent)['status'] == 'verified'
+
+
+@pytest.mark.live
+@pytest.mark.parametrize('elapsed,accepted', [(2200, True), (14401, False)])
+def test_skipped_local_reviews_keep_four_hour_finding_queue(tmp_path, monkeypatch, elapsed, accepted):
+    clock = SimpleNamespace(value=10.0)
+    monkeypatch.setattr('argo.agent.time', SimpleNamespace(monotonic=lambda: clock.value))
+
+    def progress(event):
+        if event['stage'] == 'workspace.read':
+            clock.value = 10.0 + elapsed
+
+    actions = [
+        {'action': 'workspace.read', 'parameters': {'path': 'app.py'}},
+        {'action': 'finish', 'parameters': {'summary': 'The owned source was read without local reviews.'}},
+    ]
+    with endpoint('openai', replies=actions) as (coding, _):
+        result = run_agent(
+            'Audit source after a long initial inventory', tmp_path, seed={'app.py': 'value = 1'},
+            coding=coding, use_mcp=False, skip_local_reviews=True, max_steps=4, on_progress=progress,
+            intelligence_mode='offline',
+        )
+    assert result['status'] == ('complete' if accepted else 'failed')
+    if not accepted:
+        assert result['summary'] == 'Agent task deadline exceeded'
     assert verify(Path(result['report']).parent)['status'] == 'verified'

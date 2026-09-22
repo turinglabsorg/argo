@@ -44,7 +44,7 @@ Install only the third reviewer with `uv run python scripts/install_models.py --
 
 Ask Argo to “review these files with all three local models in parallel” to use `security.review_all`, or name Qwen for an individual `security.review`. The reviewers receive the same read-only source snapshot; the selected coding model compares their responses and performs any authorized edits. Ollama may queue requests when memory is insufficient. Completed reviews are saved independently, including when another reviewer fails or is cancelled.
 
-See [model provenance](config/models.lock.json). The legacy audit/chat commands retain local specialist adapters. Mandatory finding reviews stay local regardless of the selected coding provider.
+See [model provenance](config/models.lock.json). The legacy audit/chat commands retain local specialist adapters. Mandatory finding reviews run on this computer unless you select a different inference endpoint or reviewer profile; the selected coding provider never changes that choice on its own.
 
 ## Choose your coding model
 
@@ -69,6 +69,56 @@ OpenRouter requests use a stable session identifier per run and role (coordinati
 For authentication, install [Hush](https://github.com/turinglabsorg/hush), import the credential from Bitwarden with hush pull --name NAME, then enter only NAME in the form. Argo invokes hush run --redact and injects the key into a fixed provider process. API keys are never saved in model settings or sent to code workers. Leave the credential field empty for endpoints without authentication. Selecting a remote endpoint sends task context and selected source to it.
 
 ![Coding endpoint and model selection](docs/assets/model-settings.svg)
+
+## Choose where the reviewers run
+
+By default every specialist runs against Ollama on `http://127.0.0.1:11434`. Two settings in
+`~/.argo/models.json` move that work elsewhere:
+
+    {
+      "active": "Local",
+      "profiles": [
+        {"name": "Local", "protocol": "ollama", "base_url": "http://127.0.0.1:11434", "model": "argo-coder:30b-a3b"},
+        {"name": "Omen Qwen", "protocol": "ollama", "base_url": "http://100.64.0.9:11434", "model": "argo-qwen:27b"}
+      ],
+      "local_endpoint": "http://127.0.0.1:11434",
+      "local_context_limit": 65536,
+      "reviewers": {"qwen": "Omen Qwen"}
+    }
+
+`local_endpoint` moves every specialist that still uses the Ollama path, including discovery and the
+legacy chat commands. `reviewers` assigns an individual role (`qwen`, `foundation`, `vulnllm`) to any
+saved profile, so a reviewer can be an Ollama model on another machine or an OpenAI- or
+Anthropic-compatible endpoint serving any model, abliterated or not. A role without an entry keeps
+using `local_endpoint`.
+
+`local_context_limit` caps the context Argo requests from the Ollama reviewer path. Argo otherwise
+sizes Qwen's context from the capacity the model advertises, which can exceed what the device can
+actually allocate; a smaller device needs this ceiling so an oversized review returns a visible
+capacity blocker instead of exhausting the accelerator. Non-loopback endpoints also receive a longer
+connection timeout.
+
+Reviews sent to another machine leave this computer. Argo records the selected endpoint in the run
+policy fingerprint, names it in the JSON and Markdown reports, prints it in `argo doctor`, and adds a
+coverage gap stating that project source, test output and evidence were sent there. Credentials still
+come from Hush by name and are never written into settings.
+
+### Per-project configuration
+
+A project directory can select among the profiles you already defined, in `.argo/configs.json`:
+
+    {
+      "coding": "Omen Qwen",
+      "reviewers": {"qwen": "Omen Qwen"}
+    }
+
+Values are names of profiles in `~/.argo/models.json`. A project file cannot define a base URL,
+a credential or a new endpoint, and naming an unknown profile fails the run. That boundary is
+deliberate: Argo audits code it does not trust, so a repository must never be able to redirect
+inference to an endpoint of its choosing, exfiltrate the source under review, or return forged
+approvals for the mandatory review gate. Symlinked, oversized and malformed configurations are
+rejected. The TUI reports which project configuration it applied, and the run records it.
+
 
 ## Context and auto-compact
 
@@ -108,7 +158,9 @@ After reproduction, Argo locks the original tests and helpers. It can repair the
 
 The default mounted-project budget starts at 24 plus the visible file count (up to 256), then adds eight actions per finding, capped at 1,024; disposable fixtures retain the 24-action base; existing time, context and workspace limits still apply. `--max-steps` selects a strict 1–40 action cap instead. Exhausted limits preserve pending work in the report and never turn untested findings into a clean result.
 
-To work without local specialist inference, use `argo agent 'TASK' --skip-local-reviews`, or `/reviews off` before starting a TUI task. This explicitly skips Qwen finding/fix approval and removes all local specialist tools for that run. The selected coding profile still coordinates, authors tests and edits code; select a remote profile to keep inference off the computer. Runtime tests, unchanged regression/control requirements, source bindings and incomplete-finding checks remain enforced. Reports visibly record the skipped reviews and never imply Qwen approval. The CLI flag applies to one run; the TUI choice lasts for the current app session. `/reviews on` restores the default. Saved reports and model responses cannot change this setting.
+To work without local specialist inference, use `argo agent 'TASK' --skip-local-reviews`, or `/reviews off` before starting a TUI task. This explicitly skips Qwen finding/fix approval and removes all local specialist tools for that run. The selected coding profile still coordinates, authors tests and edits code; select a remote profile to keep coding inference off the computer. Runtime tests, unchanged regression/control requirements, source bindings and incomplete-finding checks remain enforced. Reports visibly record the skipped reviews and never imply Qwen approval. The CLI flag applies to one run; the TUI choice lasts for the current app session. `/reviews on` restores the default. Saved reports and model responses cannot change this setting.
+
+To record findings without changing production source, use `argo agent 'TASK' --audit`, or `/audit on` before a TUI task. Dedicated tests under `tests/argo-security/` remain allowed; implementation edits and `fixed` verdicts are rejected. A reproduced finding is a completed audit result. Reports record `findings_and_report_only`. `/audit off` restores repair for later tasks in the same session. Existing-file edits use unique `old_text`/`new_text` patches and generate in prompt mode even when the profile requests JSON schema.
 
 ### Local test database
 

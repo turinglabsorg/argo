@@ -1,5 +1,7 @@
+import ipaddress
 import json
 import time
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -7,12 +9,48 @@ from argo.contracts import Finding, Proposal
 from argo.evidence import clean, read_evidence
 from argo.model_activity import analysis_text
 
-ENDPOINT = "http://127.0.0.1:11434"
+DEFAULT_ENDPOINT = "http://127.0.0.1:11434"
+ENDPOINT = DEFAULT_ENDPOINT
+
+
+def endpoint() -> str:
+    return ENDPOINT
+
+
+def select_endpoint(url: str) -> str:
+    global ENDPOINT
+    ENDPOINT = check_endpoint(url)
+    return ENDPOINT
+
+
+def check_endpoint(url: str) -> str:
+    if not isinstance(url, str):
+        raise ValueError("The inference endpoint must be an HTTP(S) URL")
+    parsed = urlsplit(url.strip())
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("Use an HTTP(S) inference endpoint URL")
+    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise ValueError("The inference endpoint cannot carry credentials, query or fragment")
+    if any(ord(character) < 32 for character in url):
+        raise ValueError("Control characters are not allowed in the inference endpoint")
+    return url.strip().rstrip("/")
+
+
+def loopback_endpoint(url: str | None = None) -> bool:
+    host = urlsplit(url if url is not None else endpoint()).hostname or ""
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return host == "localhost"
+
+
+def connect_timeout(url: str | None = None) -> int:
+    return 3 if loopback_endpoint(url) else 15
 
 
 def local_models() -> list[dict]:
-    with httpx.Client(timeout=3, trust_env=False) as client:
-        response = client.get(ENDPOINT + "/api/tags")
+    with httpx.Client(timeout=httpx.Timeout(10, connect=connect_timeout()), trust_env=False) as client:
+        response = client.get(endpoint() + "/api/tags")
         response.raise_for_status()
     return [
         m
@@ -41,7 +79,7 @@ def analyze(
     proposals, invalid = [], 0
     started = time.monotonic()
     with httpx.Client(
-        timeout=httpx.Timeout(30, connect=3), trust_env=False, follow_redirects=False
+        timeout=httpx.Timeout(30, connect=connect_timeout()), trust_env=False, follow_redirects=False
     ) as client:
         for item in findings[: min(limit, 8)]:
             check()
@@ -60,7 +98,7 @@ def analyze(
                 consume()
                 with client.stream(
                     "POST",
-                    ENDPOINT + "/api/chat",
+                    endpoint() + "/api/chat",
                     json={
                         "model": model,
                         "stream": True,

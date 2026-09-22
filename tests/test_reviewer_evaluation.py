@@ -17,7 +17,7 @@ def test_owned_review_controls_execute_and_evaluation_saves_results(tmp_path, mo
     assert len(rubric['positive']) == len(rubric['negative']) == 2
     final = {'summary': 'Fixture review', 'suspected_findings': []}
     with endpoint('ollama', replies=[final]) as (profile, records):
-        monkeypatch.setattr('argo.agent_models.ENDPOINT', profile.base_url)
+        monkeypatch.setattr('argo.inference.ENDPOINT', profile.base_url)
         report = script['evaluate']([QWEN], tmp_path / 'evaluation')
     assert len(report['source_sha256']) == 4
     assert report['reviews'][0]['result']['status'] == 'complete'

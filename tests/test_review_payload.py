@@ -39,7 +39,7 @@ def test_large_bound_finding_and_fix_send_every_value_once_when_repeated(review_
     apply_result(snapshot.item, 'findings.test', snapshot.result, 'b' * 64)
     metadata = {'capabilities': ['completion', 'thinking'], 'model_info': {'general.architecture': 'qwen35', 'qwen35.context_length': 262144}}
     with endpoint('ollama', replies=lambda _: ASSESSMENT, metadata=metadata) as (local, requests):
-        monkeypatch.setattr('argo.agent_models.ENDPOINT', local.base_url)
+        monkeypatch.setattr('argo.inference.ENDPOINT', local.base_url)
         run()
         apply_result(snapshot.item, 'findings.verdict', {'state': 'reproduced', 'explanation': 'Protocol fixture reproduction'}, 'd' * 64)
         snapshot.files['access.py'] += '\nfixed = True\n'
@@ -103,7 +103,7 @@ async def test_qwen_prefill_wait_preserves_stream_idle_and_total_deadline(monkey
     metadata = {'model_info': {'general.architecture': 'qwen35', 'qwen35.context_length': 262144}} if phase == 'large_prefill' else None
     messages = [{'role': 'user', 'content': 'Complete large context\n' * 17000}] if phase == 'large_prefill' else []
     with endpoint('ollama', chunks=chunks, metadata=metadata) as (local, _):
-        monkeypatch.setattr('argo.agent_models.ENDPOINT', local.base_url)
+        monkeypatch.setattr('argo.inference.ENDPOINT', local.base_url)
         if model == QWEN and phase in {'prefill', 'large_prefill'}:
             result = await local_structured(model, messages, SCHEMA, lambda: None, 4096, None, None)
             assert result == ASSESSMENT

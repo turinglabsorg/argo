@@ -89,7 +89,7 @@ def test_third_reviewer_routes_over_http_and_persists_suspected_findings(tmp_pat
 
     actions = [{'action': 'security.review', 'parameters': {'model': model, 'paths': ['app.py']}}, {'action': 'finish', 'parameters': {'summary': 'Review complete'}}]
     with endpoint('ollama', replies=local_reply) as (local, _), endpoint('openai', replies=actions) as (coding, _):
-        monkeypatch.setattr('argo.agent_models.ENDPOINT', local.base_url)
+        monkeypatch.setattr('argo.inference.ENDPOINT', local.base_url)
         result = run_agent('Review using Qwen, without edits', tmp_path, seed={'app.py': 'value = 1'}, coding=coding, use_mcp=False, max_steps=2)
     path = Path(result['report']).parent
     report = json.loads((path / 'report.json').read_text())
@@ -119,7 +119,7 @@ def test_parallel_review_saves_independent_evidence_and_coverage_gaps(tmp_path, 
 
     actions = [{'action': 'security.review_all', 'parameters': {'paths': ['app.py']}}, {'action': 'finish', 'parameters': {'summary': 'Compared reviewer responses'}}]
     with endpoint('ollama', chunks=chunks) as (local, _), endpoint('openai', replies=actions) as (coding, _):
-        monkeypatch.setattr('argo.agent_models.ENDPOINT', local.base_url)
+        monkeypatch.setattr('argo.inference.ENDPOINT', local.base_url)
         result = run_agent('Review with all three models concurrently', tmp_path, seed={'app.py': 'value = 1'}, coding=coding, use_mcp=False, max_steps=2)
     path = Path(result['report']).parent
     report = json.loads((path / 'report.json').read_text())
@@ -145,7 +145,7 @@ async def test_failed_single_review_is_recorded_and_restored(tmp_path, monkeypat
 
     actions = [{'action': 'security.review', 'parameters': {'model': 'qwen', 'paths': ['app.py']}}, {'action': 'finish', 'parameters': {'summary': 'Specialist unavailable'}}]
     with endpoint('ollama', chunks=chunks) as (local, _), endpoint('openai', replies=actions) as (coding, _):
-        monkeypatch.setattr('argo.agent_models.ENDPOINT', local.base_url)
+        monkeypatch.setattr('argo.inference.ENDPOINT', local.base_url)
         result = await asyncio.to_thread(run_agent, 'Review source without edits', tmp_path / 'runs', seed={'app.py': 'value = 1'}, coding=coding, use_mcp=False, max_steps=2)
     assert len(calls) == 1 and calls[0]['model'] == QWEN
     path = Path(result['report']).parent

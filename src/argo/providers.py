@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from argo.context_budget import ModelLimits
 from argo.evidence import clean, private_dir
+from argo.inference import check_endpoint
 from argo.provider_usage import capture_usage
 from argo.sandbox import AdapterTimeoutError, command
 
@@ -23,6 +24,9 @@ DEFAULT_MODEL = "argo-coder:30b-a3b"
 OPENROUTER_APP_URL = "https://github.com/turinglabsorg/argo"
 LIMIT_CACHE = {}
 MAX_PROVIDER_RETRIES = 5
+PROVIDER_METADATA_DEADLINE = 300
+PROVIDER_GENERATION_DEADLINE = 1200
+PROVIDER_CHILD_TIMEOUT = PROVIDER_GENERATION_DEADLINE + 60
 
 
 class ProviderTransientError(RuntimeError):
@@ -117,17 +121,28 @@ class ModelSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
     active: str = "Local Qwen"
     profiles: list[CodingProfile] = Field(default_factory=lambda: [CodingProfile()], min_length=1, max_length=30)
+    local_endpoint: str = "http://127.0.0.1:11434"
+    local_context_limit: int | None = Field(default=None, ge=1024, le=100_000_000)
+    reviewers: dict[Literal["qwen", "foundation", "vulnllm"], str] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def unique_profiles(self):
         names = [profile.name for profile in self.profiles]
         if len(set(names)) != len(names) or self.active not in names:
             raise ValueError("Profiles need unique names and an existing active selection")
+        unknown = sorted(set(self.reviewers.values()) - set(names))
+        if unknown:
+            raise ValueError("Reviewer roles must name an existing profile: " + ", ".join(unknown))
+        self.local_endpoint = check_endpoint(self.local_endpoint)
         return self
 
     @property
     def coding(self):
         return next(profile for profile in self.profiles if profile.name == self.active)
+
+    def reviewer(self, role):
+        name = self.reviewers.get(role)
+        return next((profile for profile in self.profiles if profile.name == name), None)
 
 
 def load_settings(path=SETTINGS):
@@ -141,7 +156,8 @@ def load_settings(path=SETTINGS):
 def save_profile(profile, path=SETTINGS):
     settings = load_settings(path)
     profiles = [item for item in settings.profiles if item.name != profile.name] + [profile]
-    settings = ModelSettings(active=profile.name, profiles=profiles)
+    settings = settings.model_copy(update={"active": profile.name, "profiles": profiles})
+    settings = ModelSettings.model_validate(settings.model_dump())
     private_dir(path.parent)
     descriptor, name = tempfile.mkstemp(prefix=".models-", dir=path.parent)
     try:
@@ -185,7 +201,7 @@ def request(profile, operation, messages=None, schema=None, tokens=4096, check=l
     try:
         code, output, _ = command(
             [binary, "run", "--name", profile.credential, "--env", "ARGO_PROVIDER_KEY", "--redact", "--", sys.executable, "-I", "-m", "argo.provider_worker"],
-            360, check, json.dumps(payload).encode(),
+            PROVIDER_CHILD_TIMEOUT, check, json.dumps(payload).encode(),
         )
     except AdapterTimeoutError as exc:
         raise ProviderTransientError("timeout") from exc
@@ -280,7 +296,7 @@ def exchange(profile, operation, messages=None, schema=None, tokens=4096, check=
                 else:
                     turns.append(dict(item))
             body["messages"] = turns
-        with client.stream("POST", profile.url(), headers=headers, json=body) as response:
+        with client.stream("POST", profile.url(), headers=headers, json=body, timeout=httpx.Timeout(connect=5, read=None, write=60, pool=60)) as response:
             if response.status_code >= 300:
                 raise http_error(response)
             usage = {"response_complete": False}
@@ -297,21 +313,21 @@ def exchange(profile, operation, messages=None, schema=None, tokens=4096, check=
                 on_usage(usage)
 
 
-def budget(check, started, received):
+def budget(check, started, received, deadline=PROVIDER_METADATA_DEADLINE):
     check()
     if received > 16 * 1024**2:
         raise ProviderResponseError("response_limit")
-    if time.monotonic() - started > 300:
+    if time.monotonic() - started > deadline:
         raise ProviderTransientError("timeout")
 
 
-def bounded_json(response, check, started):
+def bounded_json(response, check, started, deadline=PROVIDER_METADATA_DEADLINE):
     if response.status_code >= 300:
         raise http_error(response)
     content = bytearray()
     for part in response.iter_bytes():
         content.extend(part)
-        budget(check, started, len(content))
+        budget(check, started, len(content), deadline)
     try:
         data = json.loads(content)
     except ValueError as exc:
@@ -345,7 +361,7 @@ def http_error(response):
 def decode_generation(response, protocol, check, started, usage=None):
     usage = usage if usage is not None else {}
     if protocol != "ollama" and "text/event-stream" not in response.headers.get("content-type", ""):
-        data = bounded_json(response, check, started)
+        data = bounded_json(response, check, started, PROVIDER_GENERATION_DEADLINE)
         capture_usage(usage, data, protocol)
         if protocol == "anthropic":
             if data.get("stop_reason") == "max_tokens":
@@ -358,7 +374,7 @@ def decode_generation(response, protocol, check, started, usage=None):
     content, received, done, event = "", 0, False, []
     for line in response.iter_lines():
         received += len(line.encode())
-        budget(check, started, received)
+        budget(check, started, received, PROVIDER_GENERATION_DEADLINE)
         if protocol == "ollama":
             if not line:
                 continue
@@ -442,11 +458,21 @@ def retry_wait(seconds, check):
 def retry_reason(error):
     if isinstance(error, ProviderTransientError):
         return str(error)
+    if isinstance(error, ProviderHTTPError) and error.status == 429:
+        return str(error)
     if isinstance(error, ProviderHTTPError) and error.status in {408, 500, 502, 503, 504, 522, 524, 529}:
         return "Temporary provider failure (HTTP " + str(error.status) + ")"
     if isinstance(error, ProviderResponseError) and error.code == "incomplete":
         return "Provider stream ended before completion"
     return None
+
+
+def retry_delay(error, retries):
+    backoff = 2 ** (retries - 1)
+    if isinstance(error, ProviderHTTPError) and error.status == 429:
+        wait = error.retry_after if error.retry_after is not None else max(8, backoff)
+        return min(int(wait), 60)
+    return backoff
 
 
 def generate(profile, messages, schema, check=lambda: None, tokens=None, on_retry=lambda _: None, session_id=None, on_usage=lambda _: None):
@@ -456,6 +482,7 @@ def generate(profile, messages, schema, check=lambda: None, tokens=None, on_retr
     retries = expansions = 0
     while True:
         check()
+        error = None
         try:
             result = request(profile, "generate", messages, schema, current, check, session_id=session_id, on_usage=on_usage)
             break
@@ -466,10 +493,12 @@ def generate(profile, messages, schema, check=lambda: None, tokens=None, on_retr
                 current = min(allowed, current * 4) if expansions < 2 else allowed
                 expansions += 1
                 continue
+            error = exc
             reason = retry_reason(exc)
             if reason is None:
                 raise
         except (ProviderTransientError, ProviderHTTPError) as exc:
+            error = exc
             reason = retry_reason(exc)
             if reason is None:
                 raise
@@ -477,7 +506,7 @@ def generate(profile, messages, schema, check=lambda: None, tokens=None, on_retr
             on_retry({"phase": "exhausted", "retry": retries, "max_retries": MAX_PROVIDER_RETRIES, "reason": reason})
             raise ProviderRetryExhausted(reason + "; stopped after 5 automatic retries")
         retries += 1
-        delay = 2 ** (retries - 1)
+        delay = retry_delay(error, retries)
         details = {"retry": retries, "max_retries": MAX_PROVIDER_RETRIES, "reason": reason, "delay_seconds": delay}
         on_retry({"phase": "waiting", **details})
         retry_wait(delay, check)
