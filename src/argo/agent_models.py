@@ -531,14 +531,22 @@ def deduplicate(findings):
     Findings whose wording and advisories both differ are preserved; judging those equivalent is the
     coordinator's task, not a string comparison.
     """
-    seen, unique = set(), []
+    seen, phrases, unique = set(), [], []
     for finding in findings:
         path = finding.get("path")
         advisories = frozenset(re.findall(r"CVE-\d{4}-\d{4,7}", str(finding.get("issue", "")), re.I))
-        key = (path, advisories) if advisories else (path, restatement(finding.get("issue")))
+        phrase = restatement(finding.get("issue"))
+        key = (path, advisories) if advisories else (path, phrase)
         if key in seen:
             continue
+        # One issue restated with a trailing qualifier, e.g. the file name, is the same issue.
+        if not advisories and any(
+            kept == path and (phrase.startswith(text + " ") or text.startswith(phrase + " "))
+            for kept, text in phrases
+        ):
+            continue
         seen.add(key)
+        phrases.append((path, phrase))
         unique.append(finding)
     return unique
 

@@ -474,3 +474,37 @@ def test_configuration_too_large_to_carry_is_reported_as_a_blind_spot():
     generous, none_omitted = reference_files(files, 200000)
     assert sorted(generous) == ["app/config.py"]
     assert none_omitted == []
+
+
+def test_a_restatement_with_a_trailing_qualifier_is_one_issue():
+    """One reviewer filed the same issue twice, differing only by a parenthetical file name."""
+    from argo.agent_models import deduplicate
+
+    observed = [
+        {"issue": "Missing authorization checks in user-admin routes", "path": "app/config.py"},
+        {"issue": "Missing authorization checks in user admin routes (config.py)", "path": "app/config.py"},
+    ]
+    assert len(deduplicate(observed)) == 1
+
+
+def test_a_trailing_qualifier_does_not_merge_across_paths_or_distinct_issues():
+    from argo.agent_models import deduplicate
+
+    distinct = [
+        {"issue": "Missing authorization checks in user admin routes", "path": "app/config.py"},
+        {"issue": "Missing authorization checks in user admin routes", "path": "app/main.py"},
+        {"issue": "Missing authorization checks in user permissions handling", "path": "app/config.py"},
+        {"issue": "Missing input validation", "path": "app/config.py"},
+    ]
+    assert len(deduplicate(distinct)) == 4
+
+
+def test_distinct_advisories_survive_the_prefix_rule():
+    from argo.agent_models import deduplicate
+
+    advisories = [
+        {"issue": "DoS (CVE-2024-53981)", "path": "app/main.py"},
+        {"issue": "DoS (CVE-2024-53981) in form parsing", "path": "app/main.py"},
+        {"issue": "DoS (CVE-2026-53539)", "path": "app/main.py"},
+    ]
+    assert len(deduplicate(advisories)) == 2
