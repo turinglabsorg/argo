@@ -145,26 +145,42 @@ def test_slow_qwen_can_be_cancelled_without_waiting_for_a_token(monkeypatch, pha
             released.set()
 
 
-def test_qwen_reserves_context_for_longer_reasoning_and_retries_only_truncation(monkeypatch):
+def test_qwen_spends_its_whole_output_budget_on_the_first_attempt(monkeypatch):
+    """Thinking tokens count against num_predict, so a smaller first attempt only wastes an inference."""
     final = {'summary': 'Reviewed', 'suspected_findings': []}
 
     def chunks(body):
         assert body['model'] == QWEN and body['think'] is True
         assert body['options']['num_ctx'] == 32768
         assert body['options']['temperature'] == 0.6
-        truncated = body['options']['num_predict'] == 8192
+        yield {'message': {'content': json.dumps(final)}, 'done': True, 'done_reason': 'stop'}
+
+    with endpoint('ollama', chunks=chunks) as (profile, records):
+        monkeypatch.setattr('argo.inference.ENDPOINT', profile.base_url)
+        result = review(QWEN, {'app.py': 'value = 1'})
+    requests = [r['body'] for r in records if r['path'] == '/api/chat']
+    assert result['summary'] == 'Reviewed'
+    assert [r['options']['num_predict'] for r in requests] == [16384]
+
+
+def test_a_laddered_reviewer_still_retries_only_truncation(monkeypatch):
+    """The escalation path stays live for the reviewers that keep a two-step budget."""
+    final = {'summary': 'Reviewed', 'suspected_findings': []}
+
+    def chunks(body):
+        truncated = body['options']['num_predict'] == 4096
         yield {'message': {'content': json.dumps(final)}, 'done': True, 'done_reason': 'length' if truncated else 'stop'}
 
     with endpoint('ollama', chunks=chunks) as (profile, records):
         monkeypatch.setattr('argo.inference.ENDPOINT', profile.base_url)
         statuses = []
-        result = review(QWEN, {'app.py': 'value = 1'}, on_status=statuses.append)
+        result = review(ANALYST, {'app.py': 'value = 1'}, on_status=statuses.append)
     requests = [r['body'] for r in records if r['path'] == '/api/chat']
     assert result['summary'] == 'Reviewed'
-    assert [r['options']['num_predict'] for r in requests] == [8192, 16384]
+    assert [r['options']['num_predict'] for r in requests] == [4096, 8192]
     assert requests[0]['messages'][1:] == requests[1]['messages'][1:]
     assert 'previous generation exhausted' in requests[1]['messages'][0]['content']
-    assert any('16,384' in status for status in statuses)
+    assert any('8,192' in status for status in statuses)
 
 
 @pytest.mark.parametrize('model,accepted', [(ANALYST, False), (QWEN, True)])

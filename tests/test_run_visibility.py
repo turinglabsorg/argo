@@ -508,3 +508,31 @@ def test_distinct_advisories_survive_the_prefix_rule():
         {"issue": "DoS (CVE-2026-53539)", "path": "app/main.py"},
     ]
     assert len(deduplicate(advisories)) == 2
+
+
+def test_a_thinking_reviewer_can_afford_its_reasoning_and_its_answer():
+    """Ollama counts thinking tokens in num_predict; an 8k first budget never reached the JSON."""
+    from argo.agent_models import ANALYST, QWEN, REVIEWER, review_limits
+
+    budgets = review_limits(QWEN).output_budgets
+    assert budgets[0] >= 16384, "observed Qwen reasoning alone exceeded the previous 8192 first budget"
+    assert list(budgets) == sorted(budgets)
+    for model in (ANALYST, REVIEWER):
+        assert review_limits(model).output_budgets[0] <= budgets[0]
+
+
+def test_the_qwen_context_still_covers_its_largest_output_budget():
+    from argo.agent_models import QWEN, review_context_window, review_limits
+
+    metadata = {"model_info": {"general.architecture": "qwen35", "qwen35.context_length": 262144}}
+    messages = [{"role": "system", "content": "Review"}, {"role": "user", "content": "value = 1"}]
+    schema = {"type": "object", "properties": {"summary": {"type": "string"}}, "required": ["summary"]}
+    window = review_context_window(QWEN, messages, schema, metadata)
+    assert window >= review_limits(QWEN).output_budgets[-1]
+
+
+def test_raising_the_qwen_ceiling_would_shrink_what_it_can_review():
+    """output_budgets[-1] enters the context requirement; a larger ceiling turns reviews into blockers."""
+    from argo.agent_models import QWEN, review_limits
+
+    assert review_limits(QWEN).output_budgets[-1] == 16384

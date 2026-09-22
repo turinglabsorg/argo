@@ -149,7 +149,8 @@ def test_failed_reviews_are_durable_and_cannot_approve(review_case, monkeypatch,
     assert result["status"] == "failed"
     assert result["decision"] == "insufficient_context"
     assert snapshot.item["verification"]["state"] != "reproduced"
-    assert len([r for r in requests if r["path"] == "/api/chat"]) == (2 if failure == "length" else 0 if failure in {"http", "context"} else 1)
+    # Qwen uses a single output budget, so truncation is terminal on the first attempt.
+    assert len([r for r in requests if r["path"] == "/api/chat"]) == (0 if failure in {"http", "context"} else 1)
 
 
 @pytest.mark.parametrize("when", ["before", "during"])

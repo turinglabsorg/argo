@@ -47,7 +47,9 @@ def review_limits(model):
     if model == REVIEWER:
         return ReviewLimits(deadline=1200, read_timeout=240)
     if model == QWEN:
-        return ReviewLimits(32768, (8192, 16384), 3600, 600, 0.6, 8 * 1024**2)
+        # Thinking tokens count against num_predict: an 8,192 first attempt cannot reach the answer.
+        # A single budget keeps the context requirement unchanged, which a larger ceiling would inflate.
+        return ReviewLimits(32768, (16384,), 3600, 600, 0.6, 8 * 1024**2)
     return ReviewLimits()
 
 
