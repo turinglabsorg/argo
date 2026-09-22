@@ -97,6 +97,9 @@ def local_model_error(error):
         return "The Ollama connection ended during the response."
     if isinstance(error, ValidationError):
         return "The model answer did not match the review format."
+    if isinstance(error, ValueError):
+        # Controller-raised budget and role errors are our own text and name the real cause.
+        return str(error)[:300]
     return "The local review failed before producing a valid answer."
 
 
@@ -334,8 +337,7 @@ def imported_modules(source):
 def review(model, files, check=lambda: None, on_text=None, on_reasoning=None, on_status=None, intelligence=None):
     if model not in SPECIALISTS.values():
         raise ValueError("Choose a configured local security reviewer")
-    settings = review_limits(model)
-    reference, unreachable = reference_files(files, ModelLimits(context_window=settings.context_window).context_window) if len(files) > 1 else ({}, [])
+    reference, unreachable = reference_files(files, batch_budget(model, intelligence)) if len(files) > 1 else ({}, [])
     batches = review_batches(files, model, intelligence, reference)
     pending, offsets = [], dict.fromkeys(files, 0)
     for batch in batches:
@@ -490,11 +492,15 @@ def reference_files(files, budget):
     return selected, sorted(omitted)
 
 
-def review_batches(files, model=ANALYST, intelligence=None, reference=None):
+def batch_budget(model, intelligence=None):
+    """Tokens a batch may actually spend, after margin, output reserve and advisory context."""
     settings = review_limits(model)
     limits = ModelLimits(context_window=settings.context_window)
-    budget = limits.context_window - limits.margin - settings.output_budgets[-1] - (2048 + estimate_tokens(intelligence) if intelligence else 1024)
-    budget -= estimate_tokens(reference) if reference else 0
+    return limits.context_window - limits.margin - settings.output_budgets[-1] - (2048 + estimate_tokens(intelligence) if intelligence else 1024)
+
+
+def review_batches(files, model=ANALYST, intelligence=None, reference=None):
+    budget = batch_budget(model, intelligence) - (estimate_tokens(reference) if reference else 0)
     if budget < 512:
         raise ValueError("CVE context is too large; select fewer advisory candidates")
     batches, current = [], {}

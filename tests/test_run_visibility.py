@@ -536,3 +536,31 @@ def test_raising_the_qwen_ceiling_would_shrink_what_it_can_review():
     from argo.agent_models import QWEN, review_limits
 
     assert review_limits(QWEN).output_budgets[-1] == 16384
+
+
+def test_the_reference_never_outgrows_the_budget_it_must_fit_in():
+    """Sizing the reference against the context window, not the batch budget, starved two reviewers."""
+    from argo.agent_models import ANALYST, batch_budget, reference_files, review_batches
+    from argo.context_budget import estimate_tokens
+
+    files = {
+        "app/config.py": "setting = 1\n" * 1200,
+        "app/rbac_constants.py": "MODULI = []\n" * 40,
+        "app/auth.py": "from jose import jwt\n" * 200,
+    }
+    intelligence = {"advisories": [{"id": "a" * 16, "summary": "s" * 400, "details": "d" * 800} for _ in range(3)]}
+    budget = batch_budget(ANALYST, intelligence)
+    reference, omitted = reference_files(files, budget)
+    assert estimate_tokens(reference) < budget, "the reference must leave room for the code under review"
+    assert omitted, "configuration that cannot fit must be named"
+    assert review_batches(files, ANALYST, intelligence, reference)
+
+
+def test_a_controller_budget_error_names_its_cause():
+    """The real message was replaced by a generic failure, hiding why two reviewers died."""
+    from argo.agent_models import local_model_error
+
+    assert local_model_error(ValueError("CVE context is too large; select fewer advisory candidates")) == (
+        "CVE context is too large; select fewer advisory candidates"
+    )
+    assert local_model_error(RuntimeError("boom")) == "The local review failed before producing a valid answer."
