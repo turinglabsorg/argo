@@ -151,6 +151,24 @@ Foundation-Sec and VulnLLM source reviews reserve space for an output increase f
 
 By default, the controller invokes Qwen automatically for every conclusive `findings.verdict`. The `finding` phase evaluates `reproduced` or `refuted`; the `fix` phase evaluates `fixed` after the original unchanged controls pass. Existing deterministic test/hash checks run first. Each mandatory review includes the scoped finding, declared source, test/support files, manifests and runtime records. Fix reviews also include the original source/test evidence from the accepted finding review. The controller records the assessment as `security.review` with explicit `finding_review` metadata. Manual source reviews cannot substitute for either phase.
 
+## Following a run in progress
+
+Each run publishes progress beside its evidence so another process can follow it. `live.json` is
+replaced atomically and carries the run status, the step reached, a per-model snapshot of the latest
+answer and reasoning, and a finding summary grouped by verification state. `actions.jsonl` appends one
+line per significant action. Streaming token updates refresh the snapshot without appending, so a run
+lasting days does not grow the action log; both the per-field text and the log itself are bounded, and
+the first event is always published.
+
+The TUI `/attach` command follows a run it did not start: it replays `actions.jsonl` from a byte offset
+through the existing progress rendering path, then polls for new actions and the current snapshot. It
+selects the publishing run when no identifier is given and refuses when none is publishing. `/resume`
+continues to reopen a finished run's saved results.
+
+The task deadline is operator-selected with `--deadline <hours>` or `run_agent(task_deadline=…)`,
+bounded to one minute and thirty days. Provider-retry expansion and specialist review ceilings follow
+the same value. The selection enters the policy fingerprint and both report formats.
+
 ## Inference endpoint selection
 
 Specialist inference resolves its endpoint at request time. `~/.argo/models.json` holds

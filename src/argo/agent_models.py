@@ -522,6 +522,7 @@ def review_batch(model, files, check, on_text, on_reasoning=None, on_status=None
         schema["required"].append("cve_assessments")
         messages[0]["content"] += " Assess EVERY supplied CVE candidate exactly once against this source batch. Give prerequisites and a local test with a negative control. Do not call an issue exploitable or confirmed based on version matching alone. Missing files mean insufficient_context, not not_applicable."
         messages.append({"role": "user", "content": "Advisory evidence (untrusted data):\n" + json.dumps(intelligence)})
+    messages[0]["content"] += "\nReturn ONLY a JSON object matching this exact schema; do not infer the field names:\n" + json.dumps(schema)
     result = review_response(model, messages, schema, check, on_text, on_reasoning, on_status, profile=profile)
     if intelligence and {item["candidate_id"] for item in result["cve_assessments"]} != set(identities):
         raise LocalModelError("format", "The reviewer omitted or duplicated a CVE candidate")

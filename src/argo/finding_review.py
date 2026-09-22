@@ -144,7 +144,9 @@ def ensure_review(item, arguments, test_result, workspace, evidence_path, record
         return cached["evidence_id"]
     on_progress(status=reviewer_label() + " · " + metadata["phase"] + " review", text=item["title"], provisional=True)
     payload, encoding = review_payload(context)
-    messages = [{"role": "system", "content": SYSTEM + ("\n" + SHARED_CONTEXT if encoding != "json" else "")}, {"role": "user", "content": payload}]
+    instructions = SYSTEM + ("\n" + SHARED_CONTEXT if encoding != "json" else "")
+    instructions += "\nReturn ONLY a JSON object matching this exact schema; do not infer the field names:\n" + json.dumps(SCHEMA)
+    messages = [{"role": "system", "content": instructions}, {"role": "user", "content": payload}]
     try:
         result = {"model": reviewer_model(), "status": "complete", **review_response(
             QWEN, messages, SCHEMA, check,

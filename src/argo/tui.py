@@ -33,7 +33,7 @@ from argo.config import resolve
 from argo.context_budget import ModelLimits
 from argo.contracts import Actions, Engagement, Scope
 from argo.controller import Cancelled, run
-from argo.evidence import clean, read_evidence, read_state
+from argo.evidence import clean, read_actions, read_evidence, read_live, read_state
 from argo.finding_validation import description, state
 from argo.mcp import default_profile, load_profile
 from argo.model_activity import review_text
@@ -67,6 +67,7 @@ COMMANDS = [
     "/findings",
     "/runs",
     "/resume",
+    "/attach",
     "/report",
     "/evidence",
     "/model",
@@ -311,6 +312,8 @@ class ArgoApp(App):
         self.settings_path = settings_path
         self.coding = load_settings(settings_path).coding
         self.inference = None
+        self.follow_path = None
+        self.follow_offset = 0
         self.model_activity = {}
         self.model_messages = {}
         self.active_model = None
@@ -683,6 +686,8 @@ class ArgoApp(App):
                 self.action_runs()
             elif command == "/resume" and len(args) == 1:
                 self.resume(args[0])
+            elif command == "/attach" and len(args) <= 1:
+                self.attach(args[0] if args else None)
             elif command == "/report":
                 if not self.current_run or not (self.current_run / "report.md").is_file():
                     raise ValueError("No report loaded. Select a completed run with /runs.")
@@ -1072,6 +1077,72 @@ class ArgoApp(App):
     def run_selected(self, event):
         if not self.busy:
             self.resume(event.row_key.value)
+
+    def running_runs(self):
+        found = []
+        for path in sorted(self.state_root.glob("*")):
+            if not path.is_dir() or path.is_symlink():
+                continue
+            live = read_live(path)
+            if live and live.get("status") == "running":
+                found.append((live.get("updated_at", ""), path, live))
+        return sorted(found, reverse=True)
+
+    def attach(self, identity=None):
+        if identity:
+            path = run_path(self.state_root, identity)
+            live = read_live(path)
+            if live is None:
+                raise ValueError("That run does not publish live progress. Use /resume for a finished run.")
+        else:
+            candidates = self.running_runs()
+            if not candidates:
+                raise ValueError("No run is currently publishing progress. Start one, or use /runs and /resume.")
+            _, path, live = candidates[0]
+        if self.follow_path == path:
+            self.say("ARGO", "Already following " + path.name)
+            return
+        self.follow_path = path
+        self.follow_offset = 0
+        self.current_run = path
+        self.model_activity = {}
+        self.model_messages = {}
+        self.say("ARGO", "Following run " + path.name + " · replaying recorded actions")
+        self.follow_run()
+
+    @work(thread=True, exit_on_error=False, group="follow")
+    def follow_run(self):
+        path = self.follow_path
+        while self.follow_path == path:
+            try:
+                events, self.follow_offset = read_actions(path, self.follow_offset)
+                for event in events:
+                    self.call_from_thread(self.progress, event)
+                live = read_live(path)
+                if live:
+                    self.call_from_thread(self.follow_status, live)
+                    if live.get("status") != "running":
+                        self.call_from_thread(
+                            self.say, "ARGO", "Run " + path.name + " finished with status: " + str(live.get("status"))
+                        )
+                        self.call_from_thread(self.finish)
+                        return
+            except (OSError, ValueError):
+                pass
+            time.sleep(1.0)
+
+    def follow_status(self, live):
+        step = live.get("step")
+        stage = live.get("stage") or "working"
+        label = "Following " + str(live.get("run_id", ""))[:12] + "  ·  " + stage
+        if step:
+            label += "  ·  step " + str(step)
+        label += "  ·  " + str(live.get("actions", 0)) + " actions"
+        summary = live.get("findings")
+        if summary:
+            states = ", ".join(f"{count} {name}" for name, count in sorted(summary.get("by_state", {}).items()))
+            label += "  ·  " + str(summary.get("total", 0)) + " findings" + (f" ({states})" if states else "")
+        self.set_status(label)
 
     def resume(self, identity):
         try:

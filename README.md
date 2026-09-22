@@ -162,6 +162,23 @@ To work without local specialist inference, use `argo agent 'TASK' --skip-local-
 
 To record findings without changing production source, use `argo agent 'TASK' --audit`, or `/audit on` before a TUI task. Dedicated tests under `tests/argo-security/` remain allowed; implementation edits and `fixed` verdicts are rejected. A reproduced finding is a completed audit result. Reports record `findings_and_report_only`. `/audit off` restores repair for later tasks in the same session. Existing-file edits use unique `old_text`/`new_text` patches and generate in prompt mode even when the profile requests JSON schema.
 
+## Follow a run in progress
+
+Every run publishes its progress next to its evidence, so a task started from the CLI is not invisible.
+`live.json` is replaced atomically with the current status, the step reached, a per-model snapshot of the
+latest answer and reasoning, and a finding summary by state. `actions.jsonl` appends one line per
+significant action. Streaming token updates refresh the snapshot only, so a run lasting days does not
+grow the action log.
+
+In the TUI, `/attach` follows a run started by another process. Without an argument it selects the run
+that is currently publishing; with a run ID it follows that one. It replays the recorded actions, then
+keeps following. `/resume` still reopens a finished run's saved results.
+
+The default task deadline is four hours. `argo agent 'TASK' --deadline 72` selects a different ceiling,
+between one minute and thirty days, and the run records it in the policy fingerprint and the report.
+A run that reaches its deadline stops cleanly and keeps the work already verified.
+
+
 ### Local test database
 
 Use `/test-db mongodb` in the TUI, or `argo agent 'TASK' --test-database mongodb`, to start a fresh MongoDB for the task. The selection in the TUI lasts for the current app session; `/test-db off` disables it. Tests receive `ARGO_TEST_MONGODB_URI`. Connect with the project's existing MongoDB driver instead of starting or downloading a database binary.

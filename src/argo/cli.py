@@ -38,6 +38,7 @@ def main():
     sub.add_argument("--no-mcp", action="store_true")
     sub.add_argument("--skip-local-reviews", action="store_true", help="Skip local specialists and Qwen approval for this run; retain all runtime test gates")
     sub.add_argument("--audit", action="store_true", help="Findings and report only; dedicated tests allowed, production source is read-only")
+    sub.add_argument("--deadline", type=float, help="Task deadline in hours (default 4); the run stops cleanly when it expires")
     sub.add_argument("--test-database", choices=["off", "mongodb"], default="off", help="Start a temporary database on isolated worker loopback")
     sub.add_argument("--intelligence", choices=["offline", "connected"], help="Override saved CVE intelligence mode for this task")
     sub.add_argument("--mcp-profile", type=Path)
@@ -96,6 +97,7 @@ def main():
                 "test_database": args.test_database,
                 "skip_local_reviews": args.skip_local_reviews,
                 "audit_only": args.audit,
+                "task_deadline": int(args.deadline * 3600) if args.deadline else None,
                 "intelligence_mode": args.intelligence or load_mode(args.state_dir.parent / "intelligence-settings.json"),
                 "on_progress": lambda event: print(json.dumps(event), file=sys.stderr, flush=True),
             }

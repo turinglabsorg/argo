@@ -27,7 +27,15 @@ from argo.config import apply, resolve
 from argo.context_budget import ModelLimits, estimate_tokens
 from argo.controller import Cancelled
 from argo.conversation import Conversation, save_checkpoint
-from argo.evidence import EvidenceStore, clean, private_dir, read_evidence, redact, write_private
+from argo.evidence import (
+    EvidenceStore,
+    LiveProgress,
+    clean,
+    private_dir,
+    read_evidence,
+    redact,
+    write_private,
+)
 from argo.finding_review import (
     apply_review,
     check_review_edit,
@@ -66,6 +74,7 @@ from argo.test_database import database_mode
 from argo.workspace import Workspace, project_directory, validate_files, validate_path
 
 MAX_ACTION_ERRORS = 5
+DEFAULT_TASK_DEADLINE = 14400
 
 
 def obj(properties=None):
@@ -183,6 +192,10 @@ Procedure:
 2. Plan a partition into slices, each within working_set_budget (max_files and max_bytes). A directory
    larger than the budget must be split into smaller slices by subdirectory or file group. Prioritise the
    highest-risk areas first (authentication, authorization, input handling, database access, secrets).
+   Group by semantic dependency, not by directory name alone: include the configuration, settings and
+   constant modules a slice reads (for example the file defining an algorithm, key or feature flag)
+   together with the code that consumes them. A reviewer that cannot see the deciding value must answer
+   insufficient_context, which wastes the slice.
 3. For each slice: call workspace.focus with its paths to load it into the working set, then run the
    security specialists (security.review_all / security.review) and any CVE checks on those paths, record
    findings, and create and run the dedicated tests. Then move to the next slice.
@@ -252,7 +265,7 @@ def run_agent(
     task, state_root, seed=None, profile=None, use_mcp=True, cancelled=lambda: False,
     on_progress=lambda _: None, max_steps=None, planner=CODER, validation=None, required_reviews=(),
     coding=None, project=None, intelligence_mode="offline", test_database="off", skip_local_reviews=False,
-    audit_only=False, config=None,
+    audit_only=False, config=None, task_deadline=None,
 ):
     if not isinstance(task, str) or not task.strip() or len(task) > 8000:
         raise ValueError("Provide a task of 1–8000 characters")
@@ -262,6 +275,8 @@ def run_agent(
         raise ValueError("skip_local_reviews must be an operator-selected boolean")
     if type(audit_only) is not bool:
         raise ValueError("audit_only must be an operator-selected boolean")
+    if task_deadline is not None and (type(task_deadline) is not int or not 60 <= task_deadline <= 30 * 24 * 3600):
+        raise ValueError("task_deadline must be between 60 seconds and 30 days")
     if skip_local_reviews and required_reviews:
         raise ValueError("Cannot skip local reviews while requiring specialist reviews")
     project = project_directory(project) if project is not None else None
@@ -283,8 +298,11 @@ def run_agent(
     if skip_local_reviews:
         policy["finding_reviews"] = {"model": None, "required_phases": [], "status": "skipped_by_operator"}
     store = EvidenceStore(state_root, "isolated-agent", hashlib.sha256(json.dumps(policy, sort_keys=True).encode()).hexdigest(), 32)
+    live = LiveProgress(store.path, store.run_id)
     started = time.monotonic()
-    deadline = 14400 if connected_audit or skip_local_reviews or set(required_reviews) & {ANALYST, QWEN} else 1800
+    ceiling = task_deadline if task_deadline is not None else DEFAULT_TASK_DEADLINE
+    deadline = ceiling if connected_audit or skip_local_reviews or set(required_reviews) & {ANALYST, QWEN} else min(1800, ceiling)
+    policy["task_deadline_seconds"] = ceiling
     status, summary, gaps, events, final_files = "failed", "", [], [], dict(seed)
     if skip_local_reviews:
         gaps.append("Local specialist reviews, including mandatory Qwen finding/fix review, were skipped by operator choice. Runtime tests and source/test bindings remain enforced; no independent model review was performed.")
@@ -311,13 +329,18 @@ def run_agent(
 
     def progress(stage, model=None, **details):
         store.set("status", stage)
-        on_progress({"kind": "isolated_agent", "run_id": store.run_id, "stage": stage, "model": model or planner, **clean(details)})
+        event = {"kind": "isolated_agent", "run_id": store.run_id, "stage": stage, "model": model or planner, **clean(details)}
+        try:
+            live.record(event, status="running")
+        except OSError:
+            pass
+        on_progress(event)
 
     def provider_retry(operation, event):
         nonlocal deadline
         details = {"operation": operation, "model": coder if operation == "coding" else planner, **event}
         if event["phase"] == "waiting":
-            deadline = min(14400, deadline + 360 + event["delay_seconds"])
+            deadline = min(ceiling, deadline + 360 + event["delay_seconds"])
         identity = store.add("provider_retry", details)
         provider_retry_events.append(identity)
         progress("provider retry", details["model"], provider_retry=details)
@@ -629,7 +652,7 @@ def run_agent(
                         advisory_context = review_context(cve_catalog or {}, arguments["paths"], arguments.get("candidate_ids"))
                         track(arguments["paths"])
                         files = {validate_path(path): workspace.call("read", path=path)["content"] for path in arguments["paths"]}
-                        deadline = 14400
+                        deadline = ceiling
                         reviews = []
 
                         def completed(model, result):
@@ -652,7 +675,7 @@ def run_agent(
                         files = {validate_path(path): workspace.call("read", path=path)["content"] for path in arguments["paths"]}
                         model = SPECIALISTS[arguments["model"]]
                         if model in {ANALYST, QWEN}:
-                            deadline = 14400
+                            deadline = ceiling
                         progress(name, model)
                         try:
                             result = {"model": model, **review(
@@ -704,7 +727,7 @@ def run_agent(
                         test_result = read_evidence(store.path, arguments["test_evidence_id"])["data"]["result"]
                         result = verdict(item, arguments, test_result)
                         if arguments["interpretation"] != "inconclusive" and not skip_local_reviews:
-                            deadline = 14400
+                            deadline = ceiling
                             result["review_evidence_id"] = ensure_review(
                                 item, arguments, test_result, workspace, store.path,
                                 record_result=lambda reviewed: record_tool({"tool": "security.review", "arguments": {"model": "qwen", "finding_id": item["id"], "phase": reviewed["finding_review"]["phase"]}}, reviewed, step + 1),
@@ -811,6 +834,7 @@ def run_agent(
                 "workspace_evidence": snapshot, "code": str(store.path / "code"), "diff": str(store.path / "changes.diff"),
                 "models": {"coordinator": planner, "coder": coder, "security": [] if skip_local_reviews else list(SPECIALISTS.values())},
                 "local_reviews": policy["local_reviews"],
+                "task_deadline_seconds": policy["task_deadline_seconds"],
                 "inference": policy["inference"],
                 "audit": policy["audit"],
                 "finding_reviews": policy["finding_reviews"],
@@ -852,5 +876,9 @@ def run_agent(
             store.set("finding_count", len(findings))
             store.manifest()
         finally:
+            try:
+                live.close(status)
+            except OSError:
+                pass
             store.close()
     return {"run_id": store.run_id, "status": status, "summary": summary, "findings": len(findings), "report": str(store.path / "report.md"), "code": str(project or store.path / "code"), "project": str(project) if project else None, "diff": str(store.path / "changes.diff"), "tool_calls": len(events), "independent_validation": validation_result}

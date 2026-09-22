@@ -4,6 +4,8 @@ import os
 import re
 import sqlite3
 import stat
+import tempfile
+import time
 import uuid
 from pathlib import Path
 
@@ -160,3 +162,122 @@ def read_evidence(path: Path, identity: str) -> dict:
     if hashlib.sha256(content.removesuffix(b"\n")).hexdigest() != identity:
         raise ValueError("Evidence integrity check failed")
     return clean(json.loads(content))
+
+
+LIVE_TEXT_LIMIT = 16000
+ACTIONS_LIMIT = 32 * 1024 * 1024
+LIVE_INTERVAL = 0.4
+
+
+def significant(event):
+    """Streaming token updates refresh the snapshot only; everything else is run history."""
+    if "text" not in event and "reasoning" not in event:
+        return True
+    return event.get("provisional") is False
+
+
+def trim(event):
+    bounded = dict(event)
+    for key in ("text", "reasoning", "status"):
+        value = bounded.get(key)
+        if isinstance(value, str) and len(value) > LIVE_TEXT_LIMIT:
+            bounded[key] = value[-LIVE_TEXT_LIMIT:]
+    bounded.pop("findings", None)
+    return bounded
+
+
+class LiveProgress:
+    """Publishes a run's progress so another process, such as the TUI, can follow it."""
+
+    def __init__(self, path: Path, run_id: str, clock=time.monotonic):
+        self.clock = clock
+        self.path = path
+        self.live = path / "live.json"
+        self.actions = path / "actions.jsonl"
+        self.written = 0
+        self.flushed = float("-inf")
+        self.snapshot = {"run_id": run_id, "status": "starting", "stage": None, "step": None, "models": {}, "actions": 0}
+
+    def record(self, event, status=None):
+        model = event.get("model")
+        if isinstance(event.get("findings"), list):
+            counts = {}
+            for item in event["findings"]:
+                verification = item.get("verification") or {}
+                counts[verification.get("state", "pending")] = counts.get(verification.get("state", "pending"), 0) + 1
+            self.snapshot["findings"] = {"total": len(event["findings"]), "by_state": counts}
+        self.snapshot["updated_at"] = utc_now()
+        self.snapshot["stage"] = event.get("stage")
+        if status:
+            self.snapshot["status"] = status
+        if isinstance(event.get("stage"), str) and event["stage"].startswith("step "):
+            self.snapshot["step"] = event["stage"].removeprefix("step ")
+        if model:
+            current = self.snapshot["models"].setdefault(model, {})
+            current["stage"] = event.get("stage")
+            for key in ("text", "reasoning", "status"):
+                if isinstance(event.get(key), str) and event[key]:
+                    current[key] = event[key][-LIVE_TEXT_LIMIT:]
+            current["updated_at"] = self.snapshot["updated_at"]
+        important = significant(event)
+        if important:
+            self.append(event)
+        now = self.clock()
+        if important or now - self.flushed >= LIVE_INTERVAL:
+            self.flush()
+            self.flushed = now
+
+    def append(self, event):
+        if self.written >= ACTIONS_LIMIT:
+            return
+        line = json.dumps(trim(clean(event)), sort_keys=True) + "\n"
+        with open(self.actions, "a", encoding="utf-8") as stream:
+            stream.write(line)
+        self.written += len(line.encode())
+        self.snapshot["actions"] += 1
+
+    def flush(self):
+        descriptor, name = tempfile.mkstemp(prefix=".live-", dir=self.path)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                json.dump(clean(self.snapshot), stream)
+            os.chmod(name, 0o600)
+            os.replace(name, self.live)
+        finally:
+            Path(name).unlink(missing_ok=True)
+
+    def close(self, status):
+        self.snapshot["status"] = status
+        self.snapshot["updated_at"] = utc_now()
+        self.flush()
+
+
+def read_live(path: Path) -> dict | None:
+    target = path / "live.json"
+    if target.is_symlink() or not target.is_file() or target.stat().st_size > 4 * 1024**2:
+        return None
+    try:
+        return json.loads(target.read_text())
+    except (ValueError, OSError):
+        return None
+
+
+def read_actions(path: Path, offset: int = 0):
+    target = path / "actions.jsonl"
+    if target.is_symlink() or not target.is_file():
+        return [], offset
+    size = target.stat().st_size
+    if size < offset:
+        offset = 0
+    events = []
+    with open(target, "r", encoding="utf-8") as stream:
+        stream.seek(offset)
+        for line in stream:
+            if not line.endswith("\n"):
+                break
+            offset += len(line.encode())
+            try:
+                events.append(json.loads(line))
+            except ValueError:
+                continue
+    return events, offset
