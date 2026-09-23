@@ -1,12 +1,17 @@
 """The worker's map/selective-export contract that lets the coordinator slice a large project."""
 
 import importlib.util
+import json
 import sys
 import types
 from pathlib import Path
 
 import pytest
+from test_finding_validation import fixture
+from test_providers import endpoint, local_inference
 
+from argo.agent import run_agent
+from argo.evidence import read_evidence, verify
 from argo.workspace import Workspace
 
 WORKER = Path(__file__).resolve().parents[1] / "src" / "argo" / "data" / "agent" / "worker.py"
@@ -130,3 +135,144 @@ def test_a_mounted_large_project_exposes_map_and_slices_through_the_worker(tmp_p
         with pytest.raises(ValueError, match="budget"):
             workspace.call("export", paths=[f"module_{index:02d}.py" for index in range(60)])
         assert workspace.active
+
+
+@pytest.mark.live
+@pytest.mark.parametrize("vulnerable", [True, False])
+def test_a_sliced_project_reaches_a_recorded_verdict(tmp_path, monkeypatch, vulnerable):
+    """The whole pipeline in the mode the audits use: mounted project, slices, tracked working set.
+
+    The suite only ever proved this chain on a disposable seed, where code.edit never exports the
+    file it is about to create. That is why a large project could not create a test at all.
+    """
+    root = large_tree(tmp_path / "project")
+    source, tests, paths = fixture("python", vulnerable)
+    (root / "app" / "access.py").write_text(source["access.py"])
+    asset = "app/access.py"
+    tests = {path: content.replace("from access import", "from app.access import") for path, content in tests.items()}
+    expected = "reproduced" if vulnerable else "refuted"
+    calls, identity, evidence = 0, None, None
+
+    def respond(body):
+        nonlocal calls
+        if any(message["content"].startswith("Summarize an ongoing") for message in body["messages"]):
+            return {"summary": "Sliced the project, registered one finding, wrote its three tests."}
+        calls += 1
+        messages = body["messages"]
+        if calls == 1:
+            return {"action": "workspace.map", "parameters": {"prefix": "app"}}
+        if calls == 2:
+            return {"action": "workspace.focus", "parameters": {"paths": [asset]}}
+        if calls == 3:
+            observed = json.loads(messages[-2]["content"].split("\n", 1)[1])
+            return {"action": "findings.record", "parameters": {"findings": [{
+                "path": asset, "title": "Cross-owner access", "severity": "high",
+                "explanation": "A different actor may read the owner's data",
+                "remediation": "Compare owner and actor", "evidence_ids": [observed["evidence_id"]]}]}}
+        if calls == 4:
+            return {"action": "security.review", "parameters": {"model": "qwen", "paths": ["module_00.py"]}}
+        if calls == 5:
+            return {"action": "code.edit", "parameters": {"paths": list(tests), "instruction": "Write the regression and its controls against the real module"}}
+        if calls == 6:
+            return {"files": [{"path": path, "content": content} for path, content in tests.items()]}
+        if calls == 7:
+            return {"action": "findings.test", "parameters": {
+                "finding_id": identity, "hypothesis": "A different owner is accepted",
+                "expected_secure_behavior": "Reject a different authenticated owner",
+                "source_paths": [asset], "tests": paths}}
+        if calls == 8:
+            return {"action": "findings.verdict", "parameters": {
+                "finding_id": identity, "test_evidence_id": evidence, "interpretation": expected,
+                "explanation": "The real module was exercised with legitimate, empty and cross-owner actors."}}
+        return {"action": "finish", "parameters": {"summary": "One slice reviewed and verified; the rest of the project was not reached."}}
+
+    def progress(event):
+        nonlocal identity, evidence
+        if event.get("findings"):
+            identity = event["findings"][0]["id"]
+            evidence = event["findings"][0]["verification"].get("test_evidence_id")
+
+    assessment = {"decision": "agree", "summary": "The runtime evidence supports the scoped verdict",
+                  "test_assessment": "Real module with positive and negative controls", "remaining_concerns": []}
+    window = {"context_length": 131072, "max_output_tokens": 32768}
+    with endpoint("ollama", replies=lambda _: assessment) as (local, _), endpoint("openai", replies=respond, metadata=window) as (coding, _):
+        result = run_agent("Audit this large project slice by slice", tmp_path / "runs", project=root,
+                           coding=coding, use_mcp=False, audit_only=True, max_steps=12, on_progress=progress,
+                           config=local_inference(local.base_url))
+    assert result["status"] == "complete", result
+    run = Path(result["report"]).parent
+    report = json.loads((run / "report.json").read_text())
+    item = report["findings"][0]
+    assert item["verification"]["state"] == expected
+    for path in tests:
+        assert (root / path).read_text() == tests[path]
+    assert (root / "app" / "access.py").read_text() == source["access.py"]
+    record = read_evidence(run, item["verification"]["test_evidence_id"])["data"]["result"]
+    assert record["cases"]["positive_control"]["outcome"] == "passed"
+    assert record["cases"]["negative_control"]["outcome"] == "passed"
+    assert record["cases"]["regression"]["outcome"] == ("assertion_failed" if vulnerable else "passed")
+    errors = [read_evidence(run, identity)["data"]["error"] for identity in report["action_errors"]]
+    assert any("module_00.py" in error and "findings.defer" in error for error in errors)
+    assert any("exceeds the working-set budget" in gap for gap in report["coverage_gaps"])
+    assert verify(run)["status"] == "verified"
+
+
+@pytest.mark.live
+def test_deferring_an_unbindable_claim_drains_the_queue_and_reopens_review(tmp_path, monkeypatch):
+    """The gate must be a queue, not a deadlock: a claim nobody can test still has to clear it."""
+    root = large_tree(tmp_path / "project")
+    asset, second = "app/access.py", "module_00.py"
+    calls, identity, evidence = 0, None, None
+
+    def respond(body):
+        nonlocal calls
+        if any(message["content"].startswith("Summarize an ongoing") for message in body["messages"]):
+            return {"summary": "One slice focused, one unbindable claim deferred with its reading."}
+        calls += 1
+        messages = body["messages"]
+        if calls == 1:
+            return {"action": "workspace.focus", "parameters": {"paths": [asset]}}
+        if calls == 2:
+            observed = json.loads(messages[-2]["content"].split("\n", 1)[1])
+            return {"action": "findings.record", "parameters": {"findings": [{
+                "path": asset, "title": "Claimed missing owner check in an endpoint",
+                "severity": "medium", "explanation": "The reviewer describes a route this file does not define",
+                "remediation": "Confirm the route exists before repairing",
+                "evidence_ids": [observed["evidence_id"]]}]}}
+        if calls == 3:
+            return {"action": "security.review", "parameters": {"model": "qwen", "paths": [second]}}
+        if calls == 4:
+            return {"action": "findings.defer", "parameters": {
+                "finding_id": identity, "reason": "app/access.py defines no route; the claimed endpoint is absent",
+                "required_prerequisite": "A module that actually defines the endpoint the claim describes",
+                "evidence_ids": [evidence]}}
+        if calls == 5:
+            return {"action": "security.review", "parameters": {"model": "qwen", "paths": [second]}}
+        return {"action": "finish", "parameters": {"summary": "One claim deferred, the next slice reviewed."}}
+
+    def progress(event):
+        nonlocal identity, evidence
+        if event.get("findings"):
+            identity = event["findings"][0]["id"]
+            evidence = event["findings"][0]["evidence_ids"][0]
+
+    review = {"summary": "Reviewed", "suspected_findings": []}
+    window = {"context_length": 131072, "max_output_tokens": 32768}
+    with endpoint("ollama", replies=lambda _: review) as (local, _), endpoint("openai", replies=respond, metadata=window) as (coding, _):
+        monkeypatch.setattr("argo.inference.ENDPOINT", local.base_url)
+        result = run_agent("Audit this large project slice by slice", tmp_path / "runs", project=root,
+                           coding=coding, use_mcp=False, audit_only=True, max_steps=8, on_progress=progress,
+                           config=local_inference(local.base_url))
+    # A deferred claim is honest incompleteness, not a clean result.
+    assert result["status"] == "incomplete", result
+    assert result["summary"] == "One claim deferred, the next slice reviewed."
+    run = Path(result["report"]).parent
+    report = json.loads((run / "report.json").read_text())
+    item = report["findings"][0]
+    assert item["verification"]["state"] == "inconclusive"
+    assert "defines no route" in item["verification"]["explanation"]
+    assert [row["tool"] for row in report["tools"]].count("security.review") == 1
+    errors = [read_evidence(run, identity)["data"]["error"] for identity in report["action_errors"]]
+    assert len(errors) == 1 and second in errors[0]
+    assert any("Runtime verification unresolved" in gap for gap in report["coverage_gaps"])
+    assert verify(run)["status"] == "verified"

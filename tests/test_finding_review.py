@@ -37,8 +37,12 @@ class Snapshot:
         apply_result(self.item, "findings.test", self.result, "b" * 64)
         self.args = {"finding_id": self.item["id"], "test_evidence_id": "b" * 64, "interpretation": "reproduced", "explanation": "Review this owned protocol fixture"}
 
-    def call(self, action):
-        return {"files": dict(self.files if action == "export" else self.manifests)}
+    def call(self, action, paths=None):
+        """Mirrors Workspace.call: a selective export returns only what it was asked for."""
+        available = self.files if action == "export" else self.manifests
+        if paths is None:
+            return {"files": dict(available)}
+        return {"files": {path: available[path] for path in paths if path in available}}
 
 
 @pytest.fixture

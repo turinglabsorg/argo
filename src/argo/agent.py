@@ -530,10 +530,12 @@ def run_agent(
                 closing = {"role": "user", "content": "Continue with the next action from the latest result. Do not repeat completed work.\nController status:\n" + json.dumps(context)}
                 try:
                     messages = conversation.prepare(opening, closing, lambda messages, schema: structured(planner, messages, schema, check, tokens=min(8192, limits.context_window // 4), on_retry=lambda event: provider_retry("auto-compact", event), resample=True, **model_options("auto-compact")), check, compact_progress)
-                except (ProviderResponseError, ProviderHTTPError, ProviderTransientError, ProviderRetryExhausted, httpx.HTTPError, OSError) as exc:
+                except (ValueError, ProviderHTTPError, ProviderTransientError, ProviderRetryExhausted, httpx.HTTPError, OSError) as exc:
                     # Conversation.prepare deliberately leaves history intact and raises. The turns it could
                     # not summarize are saved evidence, so drop them without a summary and keep reviewing;
                     # a provider that cannot summarize must not end a run that still has project left.
+                    # A summary that cannot free enough context is the same problem as one the provider
+                    # could not produce, and the deterministic drop answers both.
                     detail = type(exc).__name__ + (": " + exc.code if isinstance(exc, ProviderResponseError) else "")
                     recovered = conversation.recover(opening, closing)
                     if recovered is None:
@@ -790,7 +792,11 @@ def run_agent(
                     elif name == "findings.record":
                         known_evidence = {event["evidence_id"] for event in events}
                         for item in arguments["findings"]:
-                            if validate_path(item["path"]) not in final_files and item["path"] not in (project_inventory or {}).get("manifest_sha256", {}):
+                            # A large project is never exported whole, so a focused slice lives in the
+                            # working set and not in final_files. Refusing it there would leave the
+                            # coordinator unable to register a finding about the file it just read.
+                            available = final_files.keys() | seed.keys()
+                            if validate_path(item["path"]) not in available and item["path"] not in (project_inventory or {}).get("manifest_sha256", {}):
                                 raise ValueError("Finding source must exist in the selected workspace")
                             if set(item["evidence_ids"]) - known_evidence:
                                 raise ValueError("Finding cites unknown tool evidence")

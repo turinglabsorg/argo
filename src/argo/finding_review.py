@@ -129,8 +129,34 @@ def review_context(item, arguments, test_result, files, manifests, evidence_path
     return clean(context)
 
 
+def bound_paths(item, test_result):
+    """Everything the recorded test bound itself to: what it hashed, ran and read."""
+    verification = item.get("verification") or {}
+    return sorted(
+        set(test_result["source_hashes"]) | set(test_result["test_hashes"]) | set(test_result.get("support_hashes", {}))
+        | set(test_result["source_paths"]) | set(verification.get("source_hashes", {}))
+        | set(verification.get("test_hashes", {})) | set(verification.get("source_paths", []))
+    )
+
+
+def review_files(workspace, needed):
+    """Check against the whole workspace where it fits, and against the bound paths where it does not.
+
+    A large project is never exported whole, so demanding it made the mandatory review, and with it
+    every conclusive verdict, impossible exactly where slicing is required. The recorded review says
+    which scope answered, because the narrower one cannot notice an unrelated file changing.
+    """
+    try:
+        return workspace.call("export")["files"], "workspace"
+    except ValueError as exc:
+        if "budget exceeded" not in str(exc):
+            raise
+        return workspace.call("export", paths=needed)["files"], "bound_paths"
+
+
 def ensure_review(item, arguments, test_result, workspace, evidence_path, record_result, check, on_progress):
-    files = workspace.call("export")["files"]
+    needed = bound_paths(item, test_result)
+    files, scope = review_files(workspace, needed)
     manifests = workspace.call("manifests")["files"]
     if invalidate([item], files, manifests) or state(item) == "stale":
         raise ValueError("Workspace changed before Qwen review; rerun findings.test")
@@ -159,10 +185,11 @@ def ensure_review(item, arguments, test_result, workspace, evidence_path, record
         message = str(exc) if type(exc) is ValueError else local_model_error(exc)
         result = {"model": reviewer_model(), "status": "failed", "decision": "insufficient_context", "summary": message, "error": message}
     check()
-    changed = invalidate([item], workspace.call("export")["files"], workspace.call("manifests")["files"])
+    changed = invalidate([item], review_files(workspace, needed)[0], workspace.call("manifests")["files"])
     if changed or state(item) == "stale":
         result.update(status="failed", decision="insufficient_context", summary="Workspace changed during Qwen review; rerun findings.test")
-    result.update(finding_review=metadata, review_context=context, workspace_unchanged=not changed and state(item) != "stale",
+    result.update(finding_review=metadata, review_context=context, unchanged_scope=scope,
+                  workspace_unchanged=not changed and state(item) != "stale",
                   review_input={"encoding": encoding, "sha256": hashlib.sha256(payload.encode()).hexdigest(), "estimated_input_tokens": estimate_tokens(messages)})
     identity = record_result(result)
     on_progress(text=review_text(result), provisional=False, error=result["status"] == "failed")
