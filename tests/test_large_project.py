@@ -437,3 +437,30 @@ def test_the_recorded_project_worker_runs_the_dedicated_tests(tmp_path, monkeypa
     isolation = next(read_evidence(run, entry["id"])["data"] for entry in json.loads((run / "manifest.json").read_text())["evidence"]
                      if read_evidence(run, entry["id"])["kind"] == "workspace_isolation")
     assert isolation["project_worker"]["requirements_sha256"] == requirements_digest(root / "requirements.txt")
+
+
+@pytest.mark.live
+@pytest.mark.parametrize("role,body,expected", [
+    ("regression", "def test_owned():\n    assert False\n", "assertion_failed"),
+    ("positive_control", "def test_owned():\n    assert True\n", "passed"),
+])
+def test_a_dedicated_test_ignores_the_audited_project_conftest(tmp_path, role, body, expected):
+    """The audited suite must not decide, at collection time, whether a finding can be verified.
+
+    A FastAPI project whose tests/conftest.py imports its application runs that import before any
+    dedicated test can prepare its environment, so every case came back inconclusive whatever the
+    test itself did. It is also untrusted code executing inside Argo's own verification.
+    """
+    project = tmp_path / "project"
+    (project / "tests" / "argo-security").mkdir(parents=True)
+    (project / "tests" / "conftest.py").write_text(
+        "raise RuntimeError('the audited suite imports its application at collection time')\n"
+    )
+    (project / "conftest.py").write_text("raise RuntimeError('and so does the repository root')\n")
+    (project / "tests" / "argo-security" / "conftest.py").write_text("import os\n\nos.environ.setdefault('ARGO_OWNED', '1')\n")
+    path = f"tests/argo-security/test_owned_{role}.py"
+    (project / path).write_text("import os\n\n\n" + body.replace("def test_owned():", "def test_owned():\n    assert os.environ['ARGO_OWNED'] == '1'"))
+    with Workspace(project=project) as workspace:
+        result = workspace.call("finding_test", path=path)
+    assert result["outcome"] == expected, result
+    assert result["counts"]["errors"] == 0 and result["counts"]["tests"] == 1
