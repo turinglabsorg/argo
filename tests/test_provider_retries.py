@@ -12,6 +12,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+from test_providers import endpoint as provider_endpoint
 from textual.widgets import TextArea
 
 from argo import provider_worker, providers
@@ -358,3 +359,29 @@ def test_a_retry_event_carries_the_excerpt_for_the_operator(monkeypatch):
     waiting = next(event for event in events if event["phase"] == "waiting")
     assert waiting["excerpt"] == "Sure! Here is the summary:"
     assert waiting["reason"] == ProviderResponseError.MESSAGES["invalid_json"]
+
+
+def test_a_truncated_ollama_answer_asks_for_more_room_not_another_sample():
+    """Ollama ends a cut-off answer with done_reason=length; only a bigger budget can fix it."""
+    budgets = []
+
+    def chunks(body):
+        budgets.append(body["options"]["num_predict"])
+        payload = json.dumps({"ok": True})
+        if len(budgets) == 1:
+            yield {"message": {"content": payload[: len(payload) // 2]}, "done": True, "done_reason": "length"}
+        else:
+            yield {"message": {"content": payload}, "done": True, "done_reason": "stop"}
+
+    with provider_endpoint("ollama", chunks=chunks) as (profile, _):
+        assert generate(profile, [], SCHEMA, tokens=1024) == {"ok": True}
+    assert budgets[1] > budgets[0]
+
+
+def test_a_filtered_ollama_answer_is_not_retried_as_a_bad_sample():
+    def chunks(_):
+        yield {"message": {"content": ""}, "done": True, "done_reason": "content_filter"}
+
+    with provider_endpoint("ollama", chunks=chunks) as (profile, _):
+        with pytest.raises(ProviderResponseError, match="filtered"):
+            generate(profile, [], SCHEMA, tokens=1024, resample=True)

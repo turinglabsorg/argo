@@ -411,6 +411,11 @@ def decode_generation(response, protocol, check, started, usage=None):
         if protocol == "ollama":
             content += data.get("message", {}).get("content", "")
             done = data.get("done", False)
+            # A truncated answer is a cut-off JSON document. Reported as unparsable it is
+            # resampled at the same size and truncates again; reported as the output limit it
+            # is retried with a larger budget, which is the only thing that can succeed.
+            if done and data.get("done_reason") in {"length", "content_filter"}:
+                raise ProviderResponseError("output_limit" if data["done_reason"] == "length" else "filtered")
         elif protocol == "openai":
             for choice in data.get("choices", []):
                 content += choice.get("delta", {}).get("content") or ""
