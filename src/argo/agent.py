@@ -219,6 +219,17 @@ The map lists paths, sizes and hashes only; focus a path to read its content.
 """
 
 
+REREAD_NOTICE = ("Each of these paths was read this many times. Compaction drops file contents, so a"
+                 " reread is sometimes necessary, but rereading the same file instead of acting on it"
+                 " spends the step budget without verifying anything. Work from the latest result.")
+
+
+def repeated_reads(counts, threshold=3, limit=20):
+    """The agent cannot see its own repetition once compaction has removed the observations."""
+    repeated = sorted(((path, count) for path, count in counts.items() if count >= threshold), key=lambda item: -item[1])
+    return {"note": REREAD_NOTICE, "paths": dict(repeated[:limit])} if repeated else None
+
+
 def inventory_summary(result):
     return {key: result[key] for key in ("technologies", "manifest_sha256", "coverage_gaps", "note")} | {"resolved_package_count": len(result["packages"])}
 
@@ -418,7 +429,7 @@ def run_agent(
         schema = obj({"action": {"type": "string", "enum": list(catalog)}, "parameters": {"type": "object"}})
         conversation = Conversation(limits)
         observations = conversation.observations
-        reviewed_paths = set()
+        reviewed_paths, read_counts = set(), {}
 
         def compact_progress(event):
             if event["phase"] == "complete":
@@ -522,6 +533,7 @@ def run_agent(
                     "finding_verification": queue(findings),
                     "next_finding_verification": next_verification(findings, finding_test_results, require_review=not skip_local_reviews),
                     "action_recovery": {"consecutive_errors": consecutive_errors, "max_consecutive_errors": MAX_ACTION_ERRORS},
+                    **({"repeated_reads": repeated_reads(read_counts)} if repeated_reads(read_counts) else {}),
                 }
                 opening = [
                     {"role": "system", "content": SYSTEM + VERIFICATION_GUIDANCE + (SKIPPED_REVIEW_GUIDANCE if skip_local_reviews else REVIEW_GUIDANCE) + (AUDIT_GUIDANCE if audit_only else "") + (LARGE_PROJECT_GUIDANCE if large_project else "") + "\nTool argument schemas:\n" + json.dumps(catalog)},
@@ -613,6 +625,7 @@ def run_agent(
                         result = {"focused": sorted(loaded), "unreadable": sorted(set(paths) - set(loaded)), "working_set_files": len(tracked), "files": loaded}
                     elif name == "workspace.read":
                         track([arguments["path"]])
+                        read_counts[arguments["path"]] = read_counts.get(arguments["path"], 0) + 1
                         result = workspace.call("read", **arguments)
                     elif name in {"python.run", "python.tests", "node.tests", "bandit.scan"}:
                         if name == "python.run" and not arguments["path"].endswith(".py"):

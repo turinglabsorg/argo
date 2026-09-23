@@ -5,7 +5,7 @@ import pytest
 from test_finding_validation import fixture
 from test_providers import endpoint, local_inference
 
-from argo.agent import run_agent
+from argo.agent import repeated_reads, run_agent
 from argo.evidence import read_evidence, verify
 
 
@@ -190,3 +190,36 @@ def test_invalid_reference_and_response_recover_without_replaying_edits(tmp_path
     assert [event['tool'] for event in report['tools']] == ['code.edit', 'node.tests']
     assert (root / 'code' / path).read_text() == test
     assert verify(root)['status'] == 'verified'
+
+
+def test_repeated_reads_are_only_reported_once_they_are_a_loop():
+    assert repeated_reads({}) is None
+    assert repeated_reads({"app/auth.py": 2}) is None
+    reported = repeated_reads({"app/auth.py": 33, "app/config.py": 29, "app/main.py": 1})
+    assert reported["paths"] == {"app/auth.py": 33, "app/config.py": 29}
+    assert "spends the step budget" in reported["note"]
+    crowded = repeated_reads({f"module_{index:02d}.py": index + 3 for index in range(40)})
+    assert len(crowded["paths"]) == 20
+    assert list(crowded["paths"])[0] == "module_39.py"
+
+
+@pytest.mark.live
+def test_the_controller_tells_the_agent_when_it_keeps_rereading_one_file(tmp_path, monkeypatch):
+    """Run ff4fd5b9 read thirteen files 238 times: compaction removes the content, and nothing
+    in the status let the coordinator notice it was looping instead of verifying."""
+    seen = []
+
+    def reply(body):
+        status = json.loads(body["messages"][-1]["content"].split("Controller status:\n")[1])
+        seen.append(status.get("repeated_reads"))
+        if len(seen) <= 4:
+            return {"action": "workspace.read", "parameters": {"path": "app.py"}}
+        return {"action": "finish", "parameters": {"summary": "Read the fixture repeatedly."}}
+
+    with endpoint("openai", replies=reply, metadata={"context_length": 131072}) as (coding, _):
+        result = run_agent("Review the fixture", tmp_path, seed={"app.py": "value = 1\n"},
+                           coding=coding, use_mcp=False, max_steps=6)
+    assert result["status"] == "complete", result
+    assert seen[:3] == [None, None, None]
+    assert seen[3]["paths"] == {"app.py": 3}
+    assert seen[4]["paths"] == {"app.py": 4}
