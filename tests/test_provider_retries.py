@@ -16,9 +16,17 @@ from textual.widgets import TextArea
 
 from argo import provider_worker, providers
 from argo.agent import run_agent
+from argo.context_budget import ModelLimits
 from argo.controller import Cancelled
 from argo.evidence import read_evidence, verify
-from argo.providers import CodingProfile, ProviderRetryExhausted, ProviderTransientError, generate
+from argo.providers import (
+    CodingProfile,
+    ProviderResponseError,
+    ProviderRetryExhausted,
+    ProviderTransientError,
+    generate,
+    parse_json,
+)
 from argo.tui import ArgoApp
 
 SCHEMA = {"type": "object", "properties": {"ok": {"const": True}}, "required": ["ok"], "additionalProperties": False}
@@ -317,3 +325,36 @@ async def test_cancellation_remains_responsive_during_automatic_recovery(tmp_pat
         await asyncio.sleep(0)
         assert app.cancel_event.is_set()
         app.finish()
+
+
+def test_an_unparsable_answer_is_kept_bounded_and_redacted():
+    """A discarded answer diagnoses nothing; the next invalid_json has to say what came back."""
+    secret = "ghp_" + "a" * 36
+    with pytest.raises(ProviderResponseError) as caught:
+        parse_json("Here is the summary, token " + secret + ", and then " + "x" * 900, SCHEMA)
+    error = caught.value
+    assert error.code == "invalid_json"
+    assert 0 < len(error.excerpt) <= ProviderResponseError.EXCERPT_LIMIT
+    assert error.excerpt.startswith("Here is the summary")
+    assert secret not in error.excerpt and "[redacted token]" in error.excerpt
+    assert parse_json(json.dumps({"ok": True}), SCHEMA) == {"ok": True}
+
+
+def test_a_retry_event_carries_the_excerpt_for_the_operator(monkeypatch):
+    attempts = {"n": 0}
+
+    def request(*_args, **_kwargs):
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise ProviderResponseError("invalid_json", excerpt="Sure! Here is the summary:")
+        return {"ok": True}
+
+    monkeypatch.setattr(providers, "request", request)
+    monkeypatch.setattr(providers, "retry_wait", lambda delay, check: check())
+    profile = CodingProfile(name="fixture", protocol="openai", base_url="https://provider.invalid/v1", model="m")
+    events = []
+    monkeypatch.setattr(providers, "model_limits", lambda *_args, **_kwargs: ModelLimits(context_window=16384))
+    assert generate(profile, [], SCHEMA, resample=True, on_retry=events.append) == {"ok": True}
+    waiting = next(event for event in events if event["phase"] == "waiting")
+    assert waiting["excerpt"] == "Sure! Here is the summary:"
+    assert waiting["reason"] == ProviderResponseError.MESSAGES["invalid_json"]

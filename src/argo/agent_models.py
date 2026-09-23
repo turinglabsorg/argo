@@ -342,9 +342,30 @@ def imported_modules(source):
     return result
 
 
+MIN_SOURCE_BUDGET = 2048
+
+
+def affordable_advisories(model, intelligence):
+    """Carry the advisories this reviewer's context can hold, and name the ones it cannot.
+
+    Advisory text is spent from the same window as the source. A 16k reviewer handed six
+    advisories has nothing left to read the code with: it fails before its first inference,
+    which assesses neither the advisories nor the source. A smaller reviewer therefore takes
+    fewer advisories per pass rather than none of the work.
+    """
+    advisories = list((intelligence or {}).get("advisories") or [])
+    if not advisories:
+        return intelligence, []
+    while advisories and batch_budget(model, {**intelligence, "advisories": advisories}) < MIN_SOURCE_BUDGET:
+        advisories.pop()
+    omitted = sorted(item["id"] for item in intelligence["advisories"][len(advisories):])
+    return ({**intelligence, "advisories": advisories} if advisories else None), omitted
+
+
 def review(model, files, check=lambda: None, on_text=None, on_reasoning=None, on_status=None, intelligence=None):
     if model not in SPECIALISTS.values():
         raise ValueError("Choose a configured local security reviewer")
+    intelligence, uncarried_advisories = affordable_advisories(model, intelligence)
     reference, unreachable = reference_files(files, batch_budget(model, intelligence)) if len(files) > 1 else ({}, [])
     batches = review_batches(files, model, intelligence, reference)
     pending, offsets = [], dict.fromkeys(files, 0)
@@ -367,6 +388,7 @@ def review(model, files, check=lambda: None, on_text=None, on_reasoning=None, on
             "source_batches": len(results), "reviewed_segments": segments, "review_retries": recoveries,
             "completed_paths": completed, "unreviewed_paths": sorted(set(files) - set(completed)),
             "configuration_not_carried": unreachable,
+            "advisories_not_carried": uncarried_advisories,
         }
         if intelligence:
             value["cve_assessments"] = [assessment for item in results for assessment in item["cve_assessments"]]

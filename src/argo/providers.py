@@ -14,7 +14,7 @@ from jsonschema import Draft202012Validator, ValidationError
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from argo.context_budget import ModelLimits
-from argo.evidence import clean, private_dir
+from argo.evidence import clean, private_dir, redact
 from argo.inference import check_endpoint
 from argo.provider_usage import capture_usage
 from argo.sandbox import AdapterTimeoutError, command
@@ -64,9 +64,15 @@ class ProviderResponseError(ValueError):
         "response_limit": "Provider response exceeded the transport size limit",
     }
 
-    def __init__(self, code, validation=None):
+    EXCERPT_LIMIT = 400
+
+    def __init__(self, code, validation=None, excerpt=None):
         self.code = code if code in self.MESSAGES else "invalid_format"
         self.validation = validation
+        # An answer that is not JSON tells nobody anything once it is discarded. Keeping a
+        # bounded, redacted head of it is the difference between diagnosing the next failure
+        # and guessing at it.
+        self.excerpt = redact(excerpt)[: self.EXCERPT_LIMIT] if isinstance(excerpt, str) else None
         super().__init__(self.MESSAGES[self.code])
 
 
@@ -171,14 +177,14 @@ def save_profile(profile, path=SETTINGS):
 
 def parse_json(content, schema):
     if not isinstance(content, str):
-        raise ProviderResponseError("invalid_format")
+        raise ProviderResponseError("invalid_format", excerpt=repr(content)[:ProviderResponseError.EXCERPT_LIMIT])
     text = content.strip()
     if text.startswith("```"):
         text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text).strip()
     try:
         data = json.loads(text)
     except ValueError as exc:
-        raise ProviderResponseError("invalid_json") from exc
+        raise ProviderResponseError("invalid_json", excerpt=text) from exc
     try:
         Draft202012Validator(schema).validate(data)
     except ValidationError as exc:
@@ -214,7 +220,7 @@ def request(profile, operation, messages=None, schema=None, tokens=4096, check=l
         if result.get("code") in {"timeout", "connection"}:
             raise ProviderTransientError(result["code"])
         if result.get("code") in ProviderResponseError.MESSAGES:
-            raise ProviderResponseError(result["code"], result.get("validation"))
+            raise ProviderResponseError(result["code"], result.get("validation"), result.get("excerpt"))
         if result.get("code") == "http":
             raise ProviderHTTPError(result["status"], result.get("retry_after"), result.get("shared_pool", False))
         raise RuntimeError(result["error"])
@@ -511,12 +517,13 @@ def generate(profile, messages, schema, check=lambda: None, tokens=None, on_retr
             reason = retry_reason(exc, resample)
             if reason is None:
                 raise
+        excerpt = getattr(error, "excerpt", None)
         if retries == MAX_PROVIDER_RETRIES:
-            on_retry({"phase": "exhausted", "retry": retries, "max_retries": MAX_PROVIDER_RETRIES, "reason": reason})
+            on_retry({"phase": "exhausted", "retry": retries, "max_retries": MAX_PROVIDER_RETRIES, "reason": reason, "excerpt": excerpt})
             raise ProviderRetryExhausted(reason + "; stopped after 5 automatic retries")
         retries += 1
         delay = retry_delay(error, retries)
-        details = {"retry": retries, "max_retries": MAX_PROVIDER_RETRIES, "reason": reason, "delay_seconds": delay}
+        details = {"retry": retries, "max_retries": MAX_PROVIDER_RETRIES, "reason": reason, "delay_seconds": delay, "excerpt": excerpt}
         on_retry({"phase": "waiting", **details})
         retry_wait(delay, check)
         on_retry({"phase": "retrying", **details})

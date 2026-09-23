@@ -10,7 +10,17 @@ from textual.widgets import DataTable
 
 from argo.advisories import AdvisoryService, load_mode, review_context, save_mode
 from argo.agent import run_agent
-from argo.agent_models import SPECIALISTS, review_team
+from argo.agent_models import (
+    ANALYST,
+    MIN_SOURCE_BUDGET,
+    QWEN,
+    REVIEWER,
+    SPECIALISTS,
+    affordable_advisories,
+    batch_budget,
+    review_batches,
+    review_team,
+)
 from argo.evidence import read_evidence, verify
 from argo.project_inventory import inventory
 from argo.tui import ArgoApp
@@ -262,3 +272,36 @@ async def test_cve_mode_is_saved_and_controlled_from_the_tui(tmp_path, monkeypat
         await pilot.press(*"/cve offline", "enter")
         await pilot.pause()
         assert load_mode(settings) == "offline"
+
+
+def advisory_set(count):
+    return {"advisories": [{"id": f"{index:016x}", "cve_ids": [f"CVE-2026-{1000 + index}"], "severity": "high",
+                            "summary": "Advisory summary " * 20, "details": "Advisory details " * 120,
+                            "package": {"name": f"pkg{index}", "version": "1.0.0", "path": "requirements.txt"},
+                            "fixed_versions": ["1.0.1"], "freshness": "fresh"} for index in range(count)],
+            "note": "Advisory candidates for the reviewed paths"}
+
+
+@pytest.mark.parametrize("model", [QWEN, ANALYST, REVIEWER])
+def test_each_reviewer_carries_the_advisories_its_window_affords(model):
+    """Advisory text and source spend the same window: a reviewer keeps room to read the code."""
+    intelligence = advisory_set(6)
+    carried, omitted = affordable_advisories(model, intelligence)
+    kept = carried["advisories"]
+    assert 0 < len(kept) <= 6
+    assert batch_budget(model, carried) >= MIN_SOURCE_BUDGET
+    assert [item["id"] for item in kept] == [item["id"] for item in intelligence["advisories"][:len(kept)]]
+    assert omitted == sorted(item["id"] for item in intelligence["advisories"][len(kept):])
+    assert len(kept) + len(omitted) == 6
+    assert affordable_advisories(model, None) == (None, [])
+    assert affordable_advisories(model, {"advisories": []}) == ({"advisories": []}, [])
+
+
+def test_a_wider_reviewer_carries_strictly_more_advisories():
+    intelligence = advisory_set(6)
+    wide, _ = affordable_advisories(QWEN, intelligence)
+    narrow, omitted = affordable_advisories(ANALYST, intelligence)
+    assert len(wide["advisories"]) > len(narrow["advisories"]) and omitted
+    assert review_batches({"app.py": "value = 1\n"}, ANALYST, narrow)
+    with pytest.raises(ValueError, match="CVE context is too large"):
+        review_batches({"app.py": "value = 1\n"}, ANALYST, intelligence)

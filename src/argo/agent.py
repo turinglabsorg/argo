@@ -104,7 +104,7 @@ def action_validation_error(error):
 
 PATH = {"type": "string", "minLength": 1, "maxLength": 240}
 PATHS = {"type": "array", "items": PATH, "minItems": 1, "maxItems": 6, "uniqueItems": True}
-REVIEW_IDS = {"type": "array", "items": {"type": "string", "pattern": "^[a-f0-9]{16}$"}, "minItems": 1, "maxItems": 3, "uniqueItems": True}
+REVIEW_IDS = {"type": "array", "items": {"type": "string", "pattern": "^[a-f0-9]{16}$"}, "minItems": 1, "maxItems": 6, "uniqueItems": True}
 TOOLS = {
     **VERIFICATION_TOOLS,
     "workspace.list": obj(),
@@ -146,7 +146,7 @@ For audits, consult security.inventory and security.cves: these identify the tec
 resolved versions and query OSV, NVD, EPSS and CISA KEV through the controller. An automatic CVE lookup
 may already be in the completed tools: use those results. Never invent CVEs or assume a range is a deployed version.
 security.cves returns pages of 30 candidates (optional offset). security.advisory(candidate_id) retrieves
-the full saved advisory and NVD enrichment. Pass up to three candidate_ids to security.review_all or
+the full saved advisory and NVD enrichment. Pass up to six candidate_ids to security.review_all or
 security.review so the reviewers check those advisories against relevant source paths.
 For applicable candidates, inspect the affected API, prerequisites, input control and mitigations.
 Use local positive/negative regression tests to assess reachability. For Node, write CommonJS tests
