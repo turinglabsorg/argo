@@ -50,6 +50,7 @@ from argo.finding_validation import (
     SKIPPED_REVIEW_GUIDANCE,
     apply_result,
     check_audit_edit,
+    check_review_backlog,
     check_verification_edit,
     description,
     invalidate,
@@ -204,7 +205,11 @@ Procedure:
    insufficient_context, which wastes the slice.
 3. For each slice: call workspace.focus with its paths to load it into the working set, then run the
    security specialists (security.review_all / security.review) and any CVE checks on those paths, record
-   findings, and create and run the dedicated tests. Then move to the next slice.
+   findings, and create and run the dedicated tests. Then move to the next slice. This order is enforced:
+   a review of files you have not reviewed yet is rejected while a finding from the previous one is still
+   unverified, so drain the slice through findings.test/findings.verdict or an evidence-backed
+   findings.defer first. Reading, focusing and running another reviewer over the same files stay
+   available; you will need them to verify what you already found.
 4. Focusing a new slice does not evict the previous one, but keep the working set within budget; focus a
    fresh, bounded slice rather than the whole project.
 5. Track which slices you have completed and which remain. Before finish, state in the summary every slice
@@ -310,7 +315,7 @@ def run_agent(
     deadline = ceiling if connected_audit or skip_local_reviews or set(required_reviews) & {ANALYST, QWEN} else min(1800, ceiling)
     policy["task_deadline_seconds"] = ceiling
     status, summary, gaps, events, final_files = "failed", "", [], [], dict(seed)
-    context_recoveries = []
+    context_recoveries, worker_details = [], None
     if skip_local_reviews:
         gaps.append("Local specialist reviews, including mandatory Qwen finding/fix review, were skipped by operator choice. Runtime tests and source/test bindings remain enforced; no independent model review was performed.")
     if audit_only:
@@ -413,6 +418,7 @@ def run_agent(
         schema = obj({"action": {"type": "string", "enum": list(catalog)}, "parameters": {"type": "object"}})
         conversation = Conversation(limits)
         observations = conversation.observations
+        reviewed_paths = set()
 
         def compact_progress(event):
             if event["phase"] == "complete":
@@ -426,7 +432,16 @@ def run_agent(
         workspace_options = {"test_database": test_database} if test_database != "off" else {}
         with Workspace(check, project=project, **workspace_options) as workspace:
             info = workspace.inspect()
-            store.add("workspace_isolation", {"image": workspace.image, "container": workspace.name, "mounts": info["Mounts"], "host_config": info["HostConfig"], "user": info["Config"]["User"]})
+            store.add("workspace_isolation", {"image": workspace.image, "container": workspace.name, "mounts": info["Mounts"], "host_config": info["HostConfig"], "user": info["Config"]["User"], "project_worker": workspace.worker})
+            worker_details = {"image": workspace.image, "project_dependencies": workspace.worker}
+            if workspace.worker:
+                gaps.append(
+                    "Dedicated tests ran in a worker image built from the project's own "
+                    + workspace.worker["requirements"] + " (sha256 " + workspace.worker["requirements_sha256"][:16]
+                    + "). Those third-party packages were installed from the public index at image build time;"
+                    " the run itself stayed offline. Results apply to the installed versions, not to whatever a"
+                    " deployment resolves."
+                )
             if test_database != "off":
                 store.add("test_database", workspace.database)
                 progress("test database ready", test_database=workspace.database)
@@ -673,6 +688,8 @@ def run_agent(
                             for path, value in values.items()
                         )[:8000]
                     elif name == "security.review_all":
+                        check_review_backlog(findings, arguments["paths"], reviewed_paths)
+                        reviewed_paths.update(arguments["paths"])
                         if intelligence_mode == "connected" or arguments.get("candidate_ids"):
                             ensure_cves(step + 1)
                         advisory_context = review_context(cve_catalog or {}, arguments["paths"], arguments.get("candidate_ids"))
@@ -694,6 +711,8 @@ def run_agent(
                         review_team(files, check, on_progress=lambda model, **details: progress("security.review", model, **details), on_result=completed, intelligence=advisory_context)
                         result = {"reviews": reviews, "execution": "concurrent", "status": "partial" if any(r["status"] == "failed" for r in reviews) else "complete"}
                     elif name == "security.review":
+                        check_review_backlog(findings, arguments["paths"], reviewed_paths)
+                        reviewed_paths.update(arguments["paths"])
                         if intelligence_mode == "connected" or arguments.get("candidate_ids"):
                             ensure_cves(step + 1)
                         advisory_context = review_context(cve_catalog or {}, arguments["paths"], arguments.get("candidate_ids"))
@@ -872,6 +891,7 @@ def run_agent(
                 "audit": policy["audit"],
                 "finding_reviews": policy["finding_reviews"],
                 "coding_profile": coding.model_dump() if coding else None,
+                "worker": worker_details,
                 "context_compactions": compact_events,
                 "context_recoveries": context_recoveries,
                 "provider_retries": provider_retry_events,

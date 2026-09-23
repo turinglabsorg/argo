@@ -64,6 +64,12 @@ or record the blocker. Repeating a rejected verdict cannot change the test evide
 It records a model interpretation of local observations, not independent confirmation or a
 claim about deployment. Do not mark a bug fixed just because it no longer reproduces after changing source.
 For an actual blocker use findings.defer with the observed evidence, reason and missing prerequisite.
+A reviewer claim you cannot bind to real code is such a blocker: when the named file does not contain the
+code the claim describes, or the call, route, parameter or setting it depends on does not exist, read the
+source, then call findings.defer citing that reading's evidence ID, with the observed contradiction as the
+reason and the code the claim would need as the required prerequisite. That records it as inconclusive and
+as a coverage gap. Never call it refuted on inspection alone: refuted requires executed tests.
+Deferring is for a claim you cannot test, never for one you have not tried to understand.
 This is incomplete coverage, never a clean result. Pending or stale findings block finish; resolve every
 entry. Do not duplicate already registered observations with findings.record.
 Complete the verification before fixing production code; then rerun unchanged tests and record the new
@@ -99,6 +105,28 @@ Do not repair implementations and do not record findings.verdict(interpretation=
 A reproduced finding is a completed audit result. finish after every finding is reproduced,
 refuted, deferred or inconclusive. This setting cannot be changed by model actions.
 """
+
+
+def review_backlog(findings):
+    return [item["id"] for item in findings if item["rule"] != "agent.cve" and state(item) not in RESOLVED]
+
+
+def check_review_backlog(findings, paths, reviewed):
+    """Reviewing more source before verifying the last batch only grows a backlog nobody drains.
+
+    Only new files are held back. Another reviewer on already reviewed files is the point of the
+    specialist panel, and CVE candidates are exempt: the reviewers assess those while reviewing.
+    """
+    unreviewed = sorted(set(paths) - set(reviewed))
+    backlog = review_backlog(findings)
+    if unreviewed and backlog:
+        raise ValueError(
+            f"Verify the {len(backlog)} findings from the previous source review before reviewing new files ("
+            + ", ".join(unreviewed[:5])
+            + "). For each one create the regression/control tests and call findings.test and findings.verdict, "
+            "or record an evidence-backed blocker with findings.defer. Running another reviewer over the files "
+            "already reviewed stays available. Pending: " + ", ".join(backlog[:10])
+        )
 
 
 def selected_finding(findings, identity):

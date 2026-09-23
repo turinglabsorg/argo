@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import re
@@ -9,7 +10,9 @@ from argo.sandbox import command
 from argo.test_database import MONGODB_URI, database_mode, start_mongodb
 
 WORKER_CONFIG = Path.home() / ".argo" / "worker.json"
+PROJECT_WORKERS = Path.home() / ".argo" / "workers.json"
 MAX_TOTAL = 2 * 1024 * 1024
+UNSAFE_REQUIREMENT = re.compile(r"^\s*(--?(i|index-url|extra-index-url|f|find-links|e|editable|r|requirement|c|constraint|trusted-host)\b|[./~]|git\+|https?://)")
 
 
 def validate_path(name):
@@ -62,6 +65,49 @@ def worker_image():
     return value
 
 
+def requirements_digest(path):
+    """Reject what would move the install off PyPI or run project code during the build."""
+    text = Path(path).read_text()
+    for number, line in enumerate(text.splitlines(), 1):
+        if line.lstrip().startswith("#") or not line.strip():
+            continue
+        if UNSAFE_REQUIREMENT.match(line):
+            raise ValueError(
+                f"{path}:{number} is not a plain package requirement. A project worker installs only named"
+                " packages from the default index: index, find-links, editable, local, VCS, constraint and"
+                " include directives are refused."
+            )
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def project_worker(project):
+    """An operator-built image carrying one project's declared dependencies, or None.
+
+    Its state lives beside the other operator settings: an audited project cannot select or
+    define the image it will be reviewed in.
+    """
+    if project is None or PROJECT_WORKERS.is_symlink() or not PROJECT_WORKERS.is_file():
+        return None
+    entry = json.loads(PROJECT_WORKERS.read_text()).get("projects", {}).get(str(project))
+    if entry is None:
+        return None
+    if not re.fullmatch(r"sha256:[a-f0-9]{64}", str(entry.get("image"))):
+        raise ValueError("Project worker must be pinned to a local image digest")
+    if entry.get("base") != worker_image():
+        raise ValueError(
+            "The project worker for " + str(project) + " was built on an older base worker. Rebuild it with:"
+            " uv run python scripts/install_project_worker.py --project " + str(project)
+        )
+    requirements = Path(project) / entry["requirements"]
+    if not requirements.is_file() or requirements_digest(requirements) != entry["requirements_sha256"]:
+        raise ValueError(
+            "The project worker for " + str(project) + " no longer matches " + entry["requirements"]
+            + ". Tests would run against different package versions than the project declares. Rebuild it with:"
+            " uv run python scripts/install_project_worker.py --project " + str(project)
+        )
+    return entry
+
+
 def project_directory(path):
     selected = Path(path).expanduser().resolve(strict=True)
     if not selected.is_dir() or selected in {Path("/"), Path.home().resolve()}:
@@ -105,10 +151,11 @@ def decode(code, output):
 class Workspace:
     def __init__(self, check=lambda: None, image=None, project=None, test_database="off"):
         self.check = check
-        self.image = image or worker_image()
         self.name = "argo-code-" + uuid.uuid4().hex
         self.active = False
         self.project = project_directory(project) if project is not None else None
+        self.worker = project_worker(self.project) if image is None else None
+        self.image = image or (self.worker["image"] if self.worker else worker_image())
         self.test_database = database_mode(test_database)
         self.database_name = self.name + "-mongodb"
         self.database_started = False

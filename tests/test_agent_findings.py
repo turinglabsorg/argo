@@ -4,7 +4,7 @@ import threading
 from pathlib import Path
 
 import pytest
-from test_providers import endpoint
+from test_providers import endpoint, local_inference
 from textual.widgets import DataTable, TextArea
 
 from argo.agent import run_agent
@@ -12,6 +12,7 @@ from argo.agent_findings import load_agent_findings, tool_findings
 from argo.agent_models import QWEN, REVIEWER, SPECIALISTS
 from argo.context_budget import ModelLimits
 from argo.evidence import EvidenceStore, read_evidence, read_state, verify
+from argo.finding_validation import check_review_backlog
 from argo.tui import ArgoApp
 
 
@@ -90,7 +91,7 @@ def test_third_reviewer_routes_over_http_and_persists_suspected_findings(tmp_pat
     actions = [{'action': 'security.review', 'parameters': {'model': model, 'paths': ['app.py']}}, {'action': 'finish', 'parameters': {'summary': 'Review complete'}}]
     with endpoint('ollama', replies=local_reply) as (local, _), endpoint('openai', replies=actions) as (coding, _):
         monkeypatch.setattr('argo.inference.ENDPOINT', local.base_url)
-        result = run_agent('Review using Qwen, without edits', tmp_path, seed={'app.py': 'value = 1'}, coding=coding, use_mcp=False, max_steps=2)
+        result = run_agent('Review using Qwen, without edits', tmp_path, seed={'app.py': 'value = 1'}, coding=coding, use_mcp=False, max_steps=2, config=local_inference(local.base_url))
     path = Path(result['report']).parent
     report = json.loads((path / 'report.json').read_text())
     assert QWEN in report['models']['security']
@@ -120,7 +121,7 @@ def test_parallel_review_saves_independent_evidence_and_coverage_gaps(tmp_path, 
     actions = [{'action': 'security.review_all', 'parameters': {'paths': ['app.py']}}, {'action': 'finish', 'parameters': {'summary': 'Compared reviewer responses'}}]
     with endpoint('ollama', chunks=chunks) as (local, _), endpoint('openai', replies=actions) as (coding, _):
         monkeypatch.setattr('argo.inference.ENDPOINT', local.base_url)
-        result = run_agent('Review with all three models concurrently', tmp_path, seed={'app.py': 'value = 1'}, coding=coding, use_mcp=False, max_steps=2)
+        result = run_agent('Review with all three models concurrently', tmp_path, seed={'app.py': 'value = 1'}, coding=coding, use_mcp=False, max_steps=2, config=local_inference(local.base_url))
     path = Path(result['report']).parent
     report = json.loads((path / 'report.json').read_text())
     individual = [r for r in report['tools'] if r['tool'] == 'security.review']
@@ -146,7 +147,7 @@ async def test_failed_single_review_is_recorded_and_restored(tmp_path, monkeypat
     actions = [{'action': 'security.review', 'parameters': {'model': 'qwen', 'paths': ['app.py']}}, {'action': 'finish', 'parameters': {'summary': 'Specialist unavailable'}}]
     with endpoint('ollama', chunks=chunks) as (local, _), endpoint('openai', replies=actions) as (coding, _):
         monkeypatch.setattr('argo.inference.ENDPOINT', local.base_url)
-        result = await asyncio.to_thread(run_agent, 'Review source without edits', tmp_path / 'runs', seed={'app.py': 'value = 1'}, coding=coding, use_mcp=False, max_steps=2)
+        result = await asyncio.to_thread(run_agent, 'Review source without edits', tmp_path / 'runs', seed={'app.py': 'value = 1'}, coding=coding, use_mcp=False, max_steps=2, config=local_inference(local.base_url))
     assert len(calls) == 1 and calls[0]['model'] == QWEN
     path = Path(result['report']).parent
     report = json.loads((path / 'report.json').read_text())
@@ -201,3 +202,42 @@ async def test_reopen_legacy_run_populates_findings_and_count(tmp_path, monkeypa
         findings = load_agent_findings(path, report)
         app.progress({'run_id': path.name, 'stage': 'findings', 'findings': findings * 1})
         assert app.query_one('#findings', DataTable).row_count == 1
+
+
+def test_review_backlog_holds_back_new_files_only():
+    cve = {'id': 'a' * 16, 'rule': 'agent.cve', 'asset': 'requirements.txt'}
+    found = {'id': 'b' * 16, 'rule': 'agent.security.review', 'asset': 'app.py'}
+    check_review_backlog([cve], ['app.py'], set())
+    check_review_backlog([cve, found], ['app.py'], {'app.py'})
+    with pytest.raises(ValueError, match='routes.py'):
+        check_review_backlog([cve, found], ['app.py', 'routes.py'], {'app.py'})
+    for resolved in ('reproduced', 'refuted', 'inconclusive', 'fixed'):
+        check_review_backlog([cve, {**found, 'verification': {'state': resolved}}], ['routes.py'], set())
+    for open_state in ('tested', 'stale'):
+        with pytest.raises(ValueError, match=found['id']):
+            check_review_backlog([{**found, 'verification': {'state': open_state}}], ['routes.py'], set())
+
+
+@pytest.mark.live
+def test_second_review_is_rejected_until_the_first_batch_is_resolved(tmp_path, monkeypatch):
+    def chunks(body):
+        result = {'summary': 'Review complete', 'suspected_findings': [{'path': 'app.py', 'issue': 'Missing authorization check', 'remediation': 'Verify ownership'}]}
+        yield {'message': {'content': json.dumps(result)}, 'done': True}
+
+    actions = [
+        {'action': 'security.review', 'parameters': {'model': 'qwen', 'paths': ['app.py']}},
+        {'action': 'security.review', 'parameters': {'model': 'foundation', 'paths': ['app.py']}},
+        {'action': 'security.review', 'parameters': {'model': 'vulnllm', 'paths': ['next.py']}},
+        {'action': 'finish', 'parameters': {'summary': 'Stopped at the review gate'}},
+    ]
+    with endpoint('ollama', chunks=chunks) as (local, _), endpoint('openai', replies=actions) as (coding, _):
+        monkeypatch.setattr('argo.inference.ENDPOINT', local.base_url)
+        result = run_agent('Review app.py', tmp_path, seed={'app.py': 'value = 1', 'next.py': 'value = 2'}, coding=coding, use_mcp=False, max_steps=4, config=local_inference(local.base_url))
+    path = Path(result['report']).parent
+    report = json.loads((path / 'report.json').read_text())
+    assert [row['model'] for row in report['tools']] == [QWEN, SPECIALISTS['foundation']]
+    errors = [read_evidence(path, identity)['data']['error'] for identity in report['action_errors']]
+    assert 'next.py' in errors[0] and 'findings.defer' in errors[0]
+    assert 'Verify every finding before finishing' in errors[1]
+    assert report['finding_verification']['counts'] == {'pending': 1}
+    assert verify(path)['status'] == 'verified'
