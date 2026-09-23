@@ -20,7 +20,9 @@ TOKEN = re.compile(
 )
 PRIVATE_KEY = re.compile(r"-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?-----END [^-]*PRIVATE KEY-----")
 URL_CREDENTIAL = re.compile(r"(https?://)[^/\s:@]+:[^/\s@]+@")
-URL_SECRET = re.compile(r"(?i)([?&](?:access_token|api_key|token|password|secret)=)[^&#\s]+")
+# Stop at quotes and braces: an f-string placeholder is a variable name, not a secret, and
+# consuming the closing quote hands the reviewer syntactically broken source.
+URL_SECRET = re.compile(r"(?i)([?&](?:access_token|api_key|token|password|secret)=)[^&#\s\"'{}]+")
 SECRET_KEYS = {"password", "secret", "token", "apikey", "accesstoken", "authorization", "cookie", "setcookie"}
 
 

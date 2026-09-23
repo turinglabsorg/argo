@@ -564,3 +564,23 @@ def test_a_controller_budget_error_names_its_cause():
         "CVE context is too large; select fewer advisory candidates"
     )
     assert local_model_error(RuntimeError("boom")) == "The local review failed before producing a valid answer."
+
+
+def test_redaction_preserves_fstring_placeholders_and_the_closing_quote():
+    """Redacting `{token}` turned valid source into an apparent bug and broke the string literal."""
+    from argo.evidence import redact
+
+    source = 'setup_link = f"https://app.credilex.it/auth/reset-password?token={token}"'
+    assert redact(source) == source
+    multi = 'url = f"https://x.it/cb?token={reset_token}&u={uid}"'
+    assert redact(multi) == multi
+
+
+def test_redaction_still_removes_a_real_url_secret():
+    from argo.evidence import redact
+
+    assert redact('link = "https://x.it/cb?token=eyJhbGciOiJIUzI1NiJ9.abc.def"') == (
+        'link = "https://x.it/cb?token=[redacted]"'
+    )
+    assert redact("GET https://x.it/cb?api_key=AKIAIOSFODNN7EXAMPLE") == "GET https://x.it/cb?api_key=[redacted]"
+    assert "[redacted]" in redact("https://user:hunter2@example.invalid/path")
