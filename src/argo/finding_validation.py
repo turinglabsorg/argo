@@ -234,7 +234,18 @@ def test_support(path):
 
 
 def sources(files, manifests, declared, baseline=None):
-    return hashes({**{path: text for path, text in files.items() if baseline is None or path in baseline or not is_test(path) or path in declared}, **manifests})
+    """Hash what a verification binds itself to.
+
+    Without a baseline this records the tested working set. Against one it compares the files
+    that set contained, the declared sources, and anything that can change how the bound tests
+    run, such as a conftest that arrives later. Other newcomers are ignored: a slice-by-slice
+    audit grows its working set on every focus, and counting those as changes would make each
+    new slice invalidate every verdict already recorded.
+    """
+    def bound(path):
+        return baseline is None or path in baseline or path in declared or (test_support(path) and not is_test(path))
+
+    return hashes({**{path: text for path, text in files.items() if bound(path)}, **manifests})
 
 
 def invalidate(findings, files, manifests):

@@ -1,5 +1,6 @@
 """The worker's map/selective-export contract that lets the coordinator slice a large project."""
 
+import copy
 import importlib.util
 import json
 import sys
@@ -12,6 +13,7 @@ from test_providers import endpoint, local_inference
 
 from argo.agent import run_agent
 from argo.evidence import read_evidence, verify
+from argo.finding_validation import invalidate
 from argo.workspace import Workspace
 
 WORKER = Path(__file__).resolve().parents[1] / "src" / "argo" / "data" / "agent" / "worker.py"
@@ -275,4 +277,85 @@ def test_deferring_an_unbindable_claim_drains_the_queue_and_reopens_review(tmp_p
     errors = [read_evidence(run, identity)["data"]["error"] for identity in report["action_errors"]]
     assert len(errors) == 1 and second in errors[0]
     assert any("Runtime verification unresolved" in gap for gap in report["coverage_gaps"])
+    assert verify(run)["status"] == "verified"
+
+
+@pytest.mark.live
+def test_a_verified_slice_opens_the_next_one(tmp_path, monkeypatch):
+    """The loop the audit repeats for every slice, and that no run has ever completed once."""
+    root = large_tree(tmp_path / "project")
+    source, tests, paths = fixture("python", True)
+    (root / "app" / "access.py").write_text(source["access.py"])
+    (root / "app" / "billing.py").write_text("def charge(actor, amount):\n    return amount\n")
+    first, second = "app/access.py", "app/billing.py"
+    tests = {path: content.replace("from access import", "from app.access import") for path, content in tests.items()}
+    calls, findings, evidence = 0, {}, {}
+
+    def respond(body):
+        nonlocal calls
+        if any(message["content"].startswith("Summarize an ongoing") for message in body["messages"]):
+            return {"summary": "First slice verified. Second slice focused and reviewed."}
+        calls += 1
+        messages = body["messages"]
+        observed = json.loads(messages[-2]["content"].split("\n", 1)[1]) if "Observed tool result" in messages[-2]["content"] else {}
+        if calls == 1:
+            return {"action": "workspace.focus", "parameters": {"paths": [first]}}
+        if calls == 2:
+            return {"action": "findings.record", "parameters": {"findings": [{
+                "path": first, "title": "Cross-owner access", "severity": "high",
+                "explanation": "A different actor may read the owner's data",
+                "remediation": "Compare owner and actor", "evidence_ids": [observed["evidence_id"]]}]}}
+        if calls == 3:
+            return {"action": "code.edit", "parameters": {"paths": list(tests), "instruction": "Write the regression and its controls"}}
+        if calls == 4:
+            return {"files": [{"path": path, "content": content} for path, content in tests.items()]}
+        if calls == 5:
+            return {"action": "findings.test", "parameters": {
+                "finding_id": findings[first], "hypothesis": "A different owner is accepted",
+                "expected_secure_behavior": "Reject a different authenticated owner",
+                "source_paths": [first], "tests": paths}}
+        if calls == 6:
+            return {"action": "findings.verdict", "parameters": {
+                "finding_id": findings[first], "test_evidence_id": evidence[first], "interpretation": "reproduced",
+                "explanation": "The real module accepted a different owner under its own controls."}}
+        if calls == 7:
+            return {"action": "workspace.focus", "parameters": {"paths": [second]}}
+        if calls == 8:
+            return {"action": "security.review", "parameters": {"model": "qwen", "paths": [second]}}
+        return {"action": "finish", "parameters": {"summary": "Slice one verified; slice two reviewed, nothing suspected."}}
+
+    def progress(event):
+        for item in event.get("findings") or []:
+            findings[item["asset"]] = item["id"]
+            if (item.get("verification") or {}).get("test_evidence_id"):
+                evidence[item["asset"]] = item["verification"]["test_evidence_id"]
+
+    def reviewer(body):
+        """The bound finding review and a plain source review do not share a schema."""
+        if "suspected_findings" in (body.get("format") or {}).get("properties", {}):
+            return {"summary": "Reviewed", "suspected_findings": []}
+        return {"decision": "agree", "summary": "The runtime evidence supports the scoped verdict",
+                "test_assessment": "Real module with positive and negative controls", "remaining_concerns": []}
+
+    window = {"context_length": 131072, "max_output_tokens": 32768}
+    with endpoint("ollama", replies=reviewer) as (local, _), endpoint("openai", replies=respond, metadata=window) as (coding, _):
+        monkeypatch.setattr("argo.inference.ENDPOINT", local.base_url)
+        result = run_agent("Audit this large project slice by slice", tmp_path / "runs", project=root,
+                           coding=coding, use_mcp=False, audit_only=True, max_steps=12, on_progress=progress,
+                           config=local_inference(local.base_url))
+    assert result["status"] == "complete", result
+    run = Path(result["report"]).parent
+    report = json.loads((run / "report.json").read_text())
+    assert [item["verification"]["state"] for item in report["findings"]] == ["reproduced"]
+    assert [row["tool"] for row in report["tools"]].count("security.review") == 2
+    assert report["action_errors"] == []
+    for path, content in tests.items():
+        assert (root / path).read_text() == content
+    assert (root / "app" / "billing.py").read_text() == "def charge(actor, amount):\n    return amount\n"
+    # Focusing the next slice must not invalidate what the previous one verified, but a late
+    # conftest still can: it changes how the bound tests run.
+    item = report["findings"][0]
+    exported = {path: (root / path).read_text() for path in item["verification"]["source_hashes"]}
+    assert not invalidate([copy.deepcopy(item)], {**exported, "app/extra.py": "value = 1\n"}, {})
+    assert invalidate([copy.deepcopy(item)], {**exported, "tests/conftest.py": "import pytest\n"}, {})
     assert verify(run)["status"] == "verified"
