@@ -68,7 +68,13 @@ from argo.mcp import MCPClient, default_profile
 from argo.model_activity import analysis_text
 from argo.project_inventory import inventory
 from argo.provider_usage import summarize_usage
-from argo.providers import ProviderHTTPError, ProviderResponseError, ProviderTransientError, model_limits
+from argo.providers import (
+    ProviderHTTPError,
+    ProviderResponseError,
+    ProviderRetryExhausted,
+    ProviderTransientError,
+    model_limits,
+)
 from argo.scanners import read_sources
 from argo.test_database import database_mode
 from argo.workspace import Workspace, project_directory, validate_files, validate_path
@@ -304,6 +310,7 @@ def run_agent(
     deadline = ceiling if connected_audit or skip_local_reviews or set(required_reviews) & {ANALYST, QWEN} else min(1800, ceiling)
     policy["task_deadline_seconds"] = ceiling
     status, summary, gaps, events, final_files = "failed", "", [], [], dict(seed)
+    context_recoveries = []
     if skip_local_reviews:
         gaps.append("Local specialist reviews, including mandatory Qwen finding/fix review, were skipped by operator choice. Runtime tests and source/test bindings remain enforced; no independent model review was performed.")
     if audit_only:
@@ -507,16 +514,23 @@ def run_agent(
                 ]
                 closing = {"role": "user", "content": "Continue with the next action from the latest result. Do not repeat completed work.\nController status:\n" + json.dumps(context)}
                 try:
-                    messages = conversation.prepare(opening, closing, lambda messages, schema: structured(planner, messages, schema, check, tokens=min(8192, limits.context_window // 4), on_retry=lambda event: provider_retry("auto-compact", event), **model_options("auto-compact")), check, compact_progress)
-                except (ProviderResponseError, ProviderHTTPError, ProviderTransientError, httpx.HTTPError, OSError) as exc:
-                    # Conversation.prepare deliberately leaves history intact and raises. Ending the whole
-                    # run here would discard every finding already collected, so stop the loop instead and
-                    # let the report record what was reached.
-                    reason = "Context management failed before the next action (" + type(exc).__name__ + "). Recorded findings and evidence are preserved; the remaining project was not reviewed."
-                    gaps.append(reason)
-                    progress("context failure", status=reason)
-                    status, summary = "incomplete", reason
-                    break
+                    messages = conversation.prepare(opening, closing, lambda messages, schema: structured(planner, messages, schema, check, tokens=min(8192, limits.context_window // 4), on_retry=lambda event: provider_retry("auto-compact", event), resample=True, **model_options("auto-compact")), check, compact_progress)
+                except (ProviderResponseError, ProviderHTTPError, ProviderTransientError, ProviderRetryExhausted, httpx.HTTPError, OSError) as exc:
+                    # Conversation.prepare deliberately leaves history intact and raises. The turns it could
+                    # not summarize are saved evidence, so drop them without a summary and keep reviewing;
+                    # a provider that cannot summarize must not end a run that still has project left.
+                    detail = type(exc).__name__ + (": " + exc.code if isinstance(exc, ProviderResponseError) else "")
+                    recovered = conversation.recover(opening, closing)
+                    if recovered is None:
+                        reason = "Context management failed before the next action (" + detail + "). Recorded findings and evidence are preserved; the remaining project was not reviewed."
+                        gaps.append(reason)
+                        progress("context failure", status=reason)
+                        status, summary = "incomplete", reason
+                        break
+                    messages, dropped_turns = recovered
+                    context_recoveries.append({"step": step + 1, "reason": detail, "dropped_turns": dropped_turns})
+                    store.event("context_recovery", context_recoveries[-1])
+                    progress("auto-compact", compact={"phase": "recovered", "reason": detail, "dropped_turns": dropped_turns, "compactions": conversation.compactions})
                 progress("coordination", context={"estimated_input_tokens": estimate_tokens(messages), "context_window": limits.context_window, "compactions": conversation.compactions})
                 action, name, arguments, recovery = None, None, {}, {}
                 try:
@@ -828,6 +842,13 @@ def run_agent(
         status, summary = "failed", redact(str(exc))[:1000]
     finally:
         try:
+            if context_recoveries:
+                gaps.append(
+                    f"Auto-compact failed {len(context_recoveries)} time(s) ("
+                    + ", ".join(sorted({event["reason"] for event in context_recoveries}))
+                    + f"); {sum(event['dropped_turns'] for event in context_recoveries)} older tool results were dropped"
+                    " without a summary. They remain in the run's evidence store, but the agent continued without them."
+                )
             unresolved = [item for item in findings if state(item) not in {"reproduced", "refuted", "fixed"}]
             if unresolved:
                 gaps.append(f"Runtime verification unresolved for {len(unresolved)}/{len(findings)} findings: " + ", ".join(item["id"] + " (" + state(item) + ")" for item in unresolved))
@@ -852,6 +873,7 @@ def run_agent(
                 "finding_reviews": policy["finding_reviews"],
                 "coding_profile": coding.model_dump() if coding else None,
                 "context_compactions": compact_events,
+                "context_recoveries": context_recoveries,
                 "provider_retries": provider_retry_events,
                 "action_errors": action_error_events,
                 "provider_usage": provider_usage_events,

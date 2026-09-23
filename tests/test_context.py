@@ -112,6 +112,89 @@ def test_compact_failure_and_cancellation_preserve_history():
         assert conversation.compactions == 0
 
 
+@pytest.mark.parametrize('resample', [True, False])
+def test_auto_compact_resamples_a_summary_the_provider_returns_malformed(resample):
+    calls = {'posts': 0}
+    def reply(body):
+        calls['posts'] += 1
+        return {'unusable': 'the provider returned prose'} if calls['posts'] == 1 else {'summary': 'Reviewed app.py. Issue E1 is still open.'}
+    with endpoint('openai', replies=reply, metadata={'context_length': 16384, 'max_output_tokens': 4096}) as (profile, _):
+        conversation = Conversation(model_limits(profile))
+        conversation.observations.extend([{'evidence_id': 'E1', 'untrusted_result': 'old result ' * 4000}, {'evidence_id': 'E2', 'untrusted_result': 'latest pytest passed'}])
+        opening = [{'role': 'user', 'content': 'Original operator task and authorization constraints'}]
+        closing = {'role': 'user', 'content': 'Continue from completed tools'}
+        def summarize(messages, schema):
+            return generate(profile, messages, schema, resample=resample)
+        if resample:
+            messages = conversation.prepare(opening, closing, summarize)
+            assert 'Issue E1 is still open' in messages[1]['content']
+            assert conversation.compactions == 1 and conversation.dropped == 0
+            assert calls['posts'] >= 2
+        else:
+            with pytest.raises(ProviderResponseError, match='schema'):
+                conversation.prepare(opening, closing, summarize)
+            assert conversation.compactions == 0 and conversation.summary == ''
+            assert calls['posts'] == 1
+
+
+def test_failed_summary_drops_older_turns_and_says_where_they_went():
+    conversation = Conversation(ModelLimits(context_window=16384, max_output_tokens=4096))
+    older = {'evidence_id': 'E1', 'untrusted_result': 'old result ' * 4000}
+    latest = {'evidence_id': 'E2', 'untrusted_result': 'latest pytest passed'}
+    conversation.observations.extend([older, latest])
+    opening = [{'role': 'user', 'content': 'Original operator task and authorization constraints'}]
+    closing = {'role': 'user', 'content': 'Continue from completed tools'}
+    def fail(*_):
+        raise ProviderResponseError('invalid_json')
+    with pytest.raises(ProviderResponseError):
+        conversation.prepare(opening, closing, fail)
+    assert conversation.observations == [older, latest]
+    messages, dropped = conversation.recover(opening, closing)
+    text = ' '.join(message['content'] for message in messages)
+    assert dropped == 1 and conversation.dropped == 1 and conversation.compactions == 1
+    assert conversation.observations == [latest]
+    assert estimate_tokens(messages) <= conversation.limits.input_budget
+    assert 'evidence store' in text and 'latest pytest passed' in text
+    assert 'old result' not in text
+    assert messages[0] == opening[0] and messages[-1] == closing
+    assert conversation.recover(opening, closing) is None
+
+
+def test_context_recovery_gives_up_when_the_task_itself_no_longer_fits():
+    conversation = Conversation(ModelLimits(context_window=16384, max_output_tokens=4096))
+    observation = {'evidence_id': 'E1', 'untrusted_result': 'old result ' * 4000}
+    conversation.observations.append(observation)
+    closing = {'role': 'user', 'content': 'Controller status:\n' + 'x' * 400000}
+    assert conversation.recover([{'role': 'user', 'content': 'Operator task'}], closing) is None
+    assert conversation.observations == [observation]
+    assert conversation.dropped == 0 and conversation.compactions == 0
+
+
+@pytest.mark.live
+def test_agent_keeps_reviewing_when_auto_compact_cannot_summarize(tmp_path, monkeypatch):
+    monkeypatch.setattr('argo.providers.retry_wait', lambda delay, check: check())
+    project = tmp_path / 'project'
+    project.mkdir()
+    for name in ('notes1.txt', 'notes2.txt'):
+        (project / name).write_text('Original source notes.\n' * 3000)
+    calls = {'actions': 0, 'summaries': 0}
+    def reply(body):
+        if body['messages'][1]['content'].startswith('Summarize an ongoing'):
+            calls['summaries'] += 1
+            return {'unusable': 'the provider returned prose'}
+        calls['actions'] += 1
+        return {'action': 'workspace.read', 'parameters': {'path': f"notes{calls['actions']}.txt"}} if calls['actions'] <= 2 else {'action': 'finish', 'parameters': {'summary': 'Reviewed notes. No code edits were needed.'}}
+    with endpoint('openai', replies=reply, metadata={'context_length': 16384, 'max_output_tokens': 4096}) as (profile, _):
+        result = run_agent('Review notes.txt', tmp_path / 'runs', coding=profile, project=project, use_mcp=False)
+    assert result['status'] == 'complete', result
+    report = json.loads((Path(result['report']).parent / 'report.json').read_text())
+    assert calls['actions'] == 3 and calls['summaries'] >= 6
+    assert report['context_compactions'] == []
+    assert [event['dropped_turns'] for event in report['context_recoveries']] == [1, 1]
+    assert any('dropped' in gap and 'evidence store' in gap for gap in report['coverage_gaps'])
+    assert len(report['tools']) == 2
+
+
 @pytest.mark.live
 def test_large_selected_file_reaches_coder_and_write_runs_once(tmp_path):
     project = tmp_path / 'project'

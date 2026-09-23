@@ -455,7 +455,7 @@ def retry_wait(seconds, check):
     check()
 
 
-def retry_reason(error):
+def retry_reason(error, resample=False):
     if isinstance(error, ProviderTransientError):
         return str(error)
     if isinstance(error, ProviderHTTPError) and error.status == 429:
@@ -464,6 +464,11 @@ def retry_reason(error):
         return "Temporary provider failure (HTTP " + str(error.status) + ")"
     if isinstance(error, ProviderResponseError) and error.code == "incomplete":
         return "Provider stream ended before completion"
+    # Unparsable output is a bad sample, not a bad request. Callers that can show the model its
+    # own rejected answer repair it that way; a caller that cannot, such as auto-compact, asks
+    # for the resample here instead of failing.
+    if resample and isinstance(error, ProviderResponseError) and error.code in {"invalid_json", "invalid_format", "invalid_schema"}:
+        return str(error)
     return None
 
 
@@ -475,7 +480,7 @@ def retry_delay(error, retries):
     return backoff
 
 
-def generate(profile, messages, schema, check=lambda: None, tokens=None, on_retry=lambda _: None, session_id=None, on_usage=lambda _: None):
+def generate(profile, messages, schema, check=lambda: None, tokens=None, on_retry=lambda _: None, session_id=None, on_usage=lambda _: None, resample=False):
     limits = model_limits(profile, check)
     allowed = limits.output_budget(messages, schema, profile.max_tokens)
     current = min(tokens, allowed) if tokens else limits.initial_output(messages, schema, profile.max_tokens)
@@ -485,6 +490,10 @@ def generate(profile, messages, schema, check=lambda: None, tokens=None, on_retr
         error = None
         try:
             result = request(profile, "generate", messages, schema, current, check, session_id=session_id, on_usage=on_usage)
+            try:
+                Draft202012Validator(schema).validate(result)
+            except ValidationError as exc:
+                raise ProviderResponseError("invalid_schema", response_validation(exc)) from exc
             break
         except ProviderResponseError as exc:
             if exc.code == "output_limit":
@@ -494,12 +503,12 @@ def generate(profile, messages, schema, check=lambda: None, tokens=None, on_retr
                 expansions += 1
                 continue
             error = exc
-            reason = retry_reason(exc)
+            reason = retry_reason(exc, resample)
             if reason is None:
                 raise
         except (ProviderTransientError, ProviderHTTPError) as exc:
             error = exc
-            reason = retry_reason(exc)
+            reason = retry_reason(exc, resample)
             if reason is None:
                 raise
         if retries == MAX_PROVIDER_RETRIES:
@@ -513,10 +522,6 @@ def generate(profile, messages, schema, check=lambda: None, tokens=None, on_retr
         on_retry({"phase": "retrying", **details})
     if retries:
         on_retry({"phase": "recovered", "retry": retries, "max_retries": MAX_PROVIDER_RETRIES})
-    try:
-        Draft202012Validator(schema).validate(result)
-    except ValidationError as exc:
-        raise ProviderResponseError("invalid_schema", response_validation(exc)) from exc
     return result
 
 

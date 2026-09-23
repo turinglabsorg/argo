@@ -110,9 +110,9 @@ def review_failure(model, error):
     return result
 
 
-def structured(model, messages, schema, check=lambda: None, tokens=4096, profile=None, on_text=None, on_reasoning=None, on_retry=lambda _: None, session_id=None, on_usage=lambda _: None):
+def structured(model, messages, schema, check=lambda: None, tokens=4096, profile=None, on_text=None, on_reasoning=None, on_retry=lambda _: None, session_id=None, on_usage=lambda _: None, resample=False):
     if profile is not None:
-        return generate(profile, messages, schema, check, tokens, on_retry=on_retry, session_id=session_id, on_usage=on_usage)
+        return generate(profile, messages, schema, check, tokens, on_retry=on_retry, session_id=session_id, on_usage=on_usage, resample=resample)
     if model not in MODELS:
         raise ValueError("Only installed, explicitly configured local roles are permitted")
     return asyncio.run(local_structured(model, messages, schema, check, tokens, on_text, on_reasoning))
