@@ -68,7 +68,7 @@ from argo.mcp import MCPClient, default_profile
 from argo.model_activity import analysis_text
 from argo.project_inventory import inventory
 from argo.provider_usage import summarize_usage
-from argo.providers import ProviderResponseError, model_limits
+from argo.providers import ProviderHTTPError, ProviderResponseError, ProviderTransientError, model_limits
 from argo.scanners import read_sources
 from argo.test_database import database_mode
 from argo.workspace import Workspace, project_directory, validate_files, validate_path
@@ -506,7 +506,17 @@ def run_agent(
                     {"role": "user", "content": json.dumps({"operator_task": task, "workspace_mode": ("large project mounted read/write" if large_project else "project mounted read/write") if project else "disposable copy", "initial_files": list(seed)[:30], "initial_file_count": len(seed), **({"project_map": {"file_count": project_map["file_count"], "total_bytes": project_map["total_bytes"], "truncated": project_map["truncated"], "working_set_budget": project_map["working_set_budget"], "focused_paths": sorted(tracked)}} if large_project else {})})},
                 ]
                 closing = {"role": "user", "content": "Continue with the next action from the latest result. Do not repeat completed work.\nController status:\n" + json.dumps(context)}
-                messages = conversation.prepare(opening, closing, lambda messages, schema: structured(planner, messages, schema, check, tokens=min(8192, limits.context_window // 4), on_retry=lambda event: provider_retry("auto-compact", event), **model_options("auto-compact")), check, compact_progress)
+                try:
+                    messages = conversation.prepare(opening, closing, lambda messages, schema: structured(planner, messages, schema, check, tokens=min(8192, limits.context_window // 4), on_retry=lambda event: provider_retry("auto-compact", event), **model_options("auto-compact")), check, compact_progress)
+                except (ProviderResponseError, ProviderHTTPError, ProviderTransientError, httpx.HTTPError, OSError) as exc:
+                    # Conversation.prepare deliberately leaves history intact and raises. Ending the whole
+                    # run here would discard every finding already collected, so stop the loop instead and
+                    # let the report record what was reached.
+                    reason = "Context management failed before the next action (" + type(exc).__name__ + "). Recorded findings and evidence are preserved; the remaining project was not reviewed."
+                    gaps.append(reason)
+                    progress("context failure", status=reason)
+                    status, summary = "incomplete", reason
+                    break
                 progress("coordination", context={"estimated_input_tokens": estimate_tokens(messages), "context_window": limits.context_window, "compactions": conversation.compactions})
                 action, name, arguments, recovery = None, None, {}, {}
                 try:

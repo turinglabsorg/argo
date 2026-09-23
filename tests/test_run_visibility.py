@@ -584,3 +584,44 @@ def test_redaction_still_removes_a_real_url_secret():
     )
     assert redact("GET https://x.it/cb?api_key=AKIAIOSFODNN7EXAMPLE") == "GET https://x.it/cb?api_key=[redacted]"
     assert "[redacted]" in redact("https://user:hunter2@example.invalid/path")
+
+
+@pytest.mark.live
+def test_a_failed_compaction_ends_the_run_with_its_findings_instead_of_losing_them(tmp_path, monkeypatch):
+    """A four-hour audit died with 159 findings when one compaction call returned invalid JSON."""
+    from argo.conversation import Conversation
+    from argo.providers import ProviderResponseError
+
+    original = Conversation.prepare
+    calls = {"n": 0}
+
+    def flaky(self, opening, closing, summarize, check=lambda: None, on_compact=lambda _: None):
+        calls["n"] += 1
+        if calls["n"] == 3:
+            raise ProviderResponseError("invalid_json")
+        return original(self, opening, closing, summarize, check, on_compact)
+
+    monkeypatch.setattr(Conversation, "prepare", flaky)
+    step = {"n": 0}
+
+    def respond(body):
+        step["n"] += 1
+        if step["n"] == 1:
+            return {"action": "workspace.read", "parameters": {"path": "app.py"}}
+        text = json.dumps(body).replace('\\"', '"')
+        evidence = next(v for v in text.split('"') if len(v) == 64 and all(c in "0123456789abcdef" for c in v))
+        return {"action": "findings.record", "parameters": {"findings": [{
+            "path": "app.py", "title": "Cross-owner access", "severity": "high",
+            "explanation": "A different actor may read owner data", "remediation": "Check ownership",
+            "evidence_ids": [evidence],
+        }]}}
+
+    with endpoint("openai", replies=respond) as (coding, _):
+        result = run_agent(
+            "Audit the owned fixture", tmp_path, seed={"app.py": "value = 1"},
+            coding=coding, use_mcp=False, max_steps=6, skip_local_reviews=True,
+        )
+    assert result["status"] == "incomplete", result
+    assert result["findings"] >= 1, "findings collected before the failure must survive"
+    report = json.loads((Path(result["report"]).parent / "report.json").read_text())
+    assert any("Context management failed" in gap for gap in report["coverage_gaps"])
