@@ -115,7 +115,13 @@ def files(selection=None):
         result, size = {}, 0
         for path in chosen:
             parts(path)
-            content = read_file(path)
+            try:
+                content = read_file(path)
+            except (ValueError, OSError, UnicodeError):
+                # A selected path may not exist yet, or may be binary or oversized. The caller
+                # compares the result against its selection; a file about to be created must not
+                # fail the export that precedes writing it.
+                continue
             size += len(content.encode())
             if size > MAX_TOTAL:
                 raise ValueError("Working-set selection exceeds the " + str(MAX_TOTAL // 1024) + " KiB content budget")

@@ -457,8 +457,8 @@ def run_agent(
                 loaded = workspace.call("export", paths=pending)["files"]
                 for path in pending:
                     tracked.add(path)
-                    if path not in seed:
-                        seed[path] = loaded.get(path)
+                    if path not in seed and path in loaded:
+                        seed[path] = loaded[path]
 
             def snapshot():
                 if not large_project:

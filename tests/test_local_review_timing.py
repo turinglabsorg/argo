@@ -42,6 +42,30 @@ def test_review_deadline_allows_slow_foundation_but_remains_bounded(monkeypatch,
     assert requests[0]['options']['num_ctx'] == review_limits(model).context_window
 
 
+@pytest.mark.parametrize('elapsed,accepted', [(3601, True), (8192, True), (8193, False)])
+def test_qwen_deadline_covers_the_output_budget_it_was_granted(monkeypatch, elapsed, accepted):
+    """A small slice must not shorten the deadline: the time goes into the answer, not the reading."""
+    clock = SimpleNamespace(value=10.0)
+    monkeypatch.setattr('argo.agent_models.time', SimpleNamespace(monotonic=lambda: clock.value))
+    final = {'summary': 'Reviewed', 'suspected_findings': []}
+    chunks = [{'message': {'thinking': 'Checking ownership'}, 'done': False},
+              {'message': {'content': json.dumps(final)}, 'done': True, 'done_reason': 'stop'}]
+
+    def progress(_):
+        clock.value = 10.0 + elapsed
+
+    with endpoint('ollama', chunks=chunks) as (profile, records):
+        monkeypatch.setattr('argo.inference.ENDPOINT', profile.base_url)
+        if accepted:
+            assert review(QWEN, {'app.py': 'value = 1'}, on_reasoning=progress)['summary'] == 'Reviewed'
+        else:
+            with pytest.raises(LocalModelError, match='deadline'):
+                review(QWEN, {'app.py': 'value = 1'}, on_reasoning=progress)
+    request = next(r['body'] for r in records if r['path'] == '/api/chat')
+    assert request['options']['num_ctx'] <= 65536
+    assert request['options']['num_predict'] == review_limits(QWEN).output_budgets[-1]
+
+
 def test_foundation_can_still_be_cancelled_after_the_old_deadline(monkeypatch):
     clock = SimpleNamespace(value=10.0)
     monkeypatch.setattr('argo.agent_models.time', SimpleNamespace(monotonic=lambda: clock.value))

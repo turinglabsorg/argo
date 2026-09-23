@@ -93,11 +93,15 @@ def test_shared_payload_roundtrip_and_reference_collision(context):
 async def test_qwen_prefill_wait_preserves_stream_idle_and_total_deadline(monkeypatch, model, phase):
     limits = replace(review_limits(model), read_timeout=0.1, deadline=0.25 if phase in {'deadline', 'large_prefill'} else 3)
     monkeypatch.setattr('argo.agent_models.review_limits', lambda _: limits)
+    # The generation floor is a physical token rate, not a budget this fixture shrinks, so a
+    # short deadline only means anything once emitting the granted output costs nothing. The
+    # floor still rounds up to a second, which is why the deadline phase waits longer than that.
+    monkeypatch.setattr('argo.agent_models.SLOWEST_TOKENS_PER_SECOND', 10 ** 6)
 
     def chunks(_):
         if phase == 'idle':
             yield {'message': {'thinking': 'Fixture activity'}, 'done': False}
-        time.sleep(0.5)
+        time.sleep(1.5 if phase == 'deadline' else 0.5)
         yield {'message': {'content': json.dumps(ASSESSMENT)}, 'done': True}
 
     metadata = {'model_info': {'general.architecture': 'qwen35', 'qwen35.context_length': 262144}} if phase == 'large_prefill' else None

@@ -62,6 +62,24 @@ def test_a_selected_slice_returns_only_that_slice(tmp_path):
     assert "can_read" in selected["app/access.py"]
 
 
+def test_a_slice_skips_what_it_cannot_read_instead_of_failing(tmp_path):
+    """code.edit exports its targets before writing them, and a new test file does not exist yet."""
+    root = large_tree(tmp_path)
+    (root / "tests").mkdir()
+    (root / "logo.bin").write_bytes(b"\x00\xff\xfe binary")
+    worker = worker_module(root)
+    selected = worker.files([
+        "app/access.py",
+        "tests/argo-security/test_new_regression.py",
+        "tests/argo-security/test_new_positive_control.py",
+        "missing.py",
+        "logo.bin",
+    ])
+    assert sorted(selected) == ["app/access.py"]
+    with pytest.raises(ValueError):
+        worker.files(["../outside.py"])
+
+
 def test_a_slice_over_the_working_set_budget_is_refused(tmp_path):
     worker = worker_module(large_tree(tmp_path))
     with pytest.raises(ValueError, match="content budget"):

@@ -29,6 +29,9 @@ QWEN = "argo-qwen:27b"
 SPECIALISTS = {"foundation": ANALYST, "vulnllm": REVIEWER, "qwen": QWEN}
 MODELS = [CODER, *SPECIALISTS.values()]
 CONTEXT_LIMIT = None
+# Three reviewers share one GPU, so the slowest sustained rate observed for the 27B reviewer,
+# not its best, is what a deadline has to survive.
+SLOWEST_TOKENS_PER_SECOND = 2
 
 
 @dataclass(frozen=True)
@@ -160,7 +163,12 @@ async def local_structured(model, messages, schema, check, tokens, on_text, on_r
             payload["think"] = "thinking" in metadata.get("capabilities", [])
             payload["options"]["num_ctx"] = review_context_window(model, payload["messages"], schema, metadata)
             if model == QWEN:
-                deadline = min(14400, limits.deadline * max(1, math.ceil(payload["options"]["num_ctx"] / 65536)))
+                # Reading the slice scales with context, but the time is spent emitting the budget
+                # we granted. Sizing the deadline on context alone shortens it exactly when the
+                # batch is small, which kills the model mid-answer with output still owed.
+                prefill = limits.deadline * max(1, math.ceil(payload["options"]["num_ctx"] / 65536))
+                generation = math.ceil(payload["options"]["num_predict"] / SLOWEST_TOKENS_PER_SECOND)
+                deadline = min(14400, max(prefill, generation))
         request = client.build_request("POST", endpoint() + "/api/chat", json=payload)
         response = await wait_local(client.send(request, stream=True), check, started, deadline)
         try:
