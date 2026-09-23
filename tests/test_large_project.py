@@ -11,10 +11,11 @@ import pytest
 from test_finding_validation import fixture
 from test_providers import endpoint, local_inference
 
+from argo import workspace as workspace_module
 from argo.agent import run_agent
 from argo.evidence import read_evidence, verify
 from argo.finding_validation import invalidate
-from argo.workspace import Workspace
+from argo.workspace import Workspace, requirements_digest, worker_image
 
 WORKER = Path(__file__).resolve().parents[1] / "src" / "argo" / "data" / "agent" / "worker.py"
 
@@ -359,3 +360,80 @@ def test_a_verified_slice_opens_the_next_one(tmp_path, monkeypatch):
     assert not invalidate([copy.deepcopy(item)], {**exported, "app/extra.py": "value = 1\n"}, {})
     assert invalidate([copy.deepcopy(item)], {**exported, "tests/conftest.py": "import pytest\n"}, {})
     assert verify(run)["status"] == "verified"
+
+
+@pytest.mark.live
+def test_the_recorded_project_worker_runs_the_dedicated_tests(tmp_path, monkeypatch):
+    """An audited project's own image must carry the run, and the report must say so.
+
+    Whether a given image imports a given application is the operator's build-time check; what
+    the run owes is that the image it was told to use is the one the tests execute in.
+    """
+    root = large_tree(tmp_path / "project")
+    source, tests, paths = fixture("python", True)
+    (root / "app" / "access.py").write_text(source["access.py"])
+    (root / "requirements.txt").write_text("# only packages the stock worker already carries\npytest==8.3.3\n")
+    tests = {path: content.replace("from access import", "from app.access import") for path, content in tests.items()}
+    registry = tmp_path / "workers.json"
+    monkeypatch.setattr(workspace_module, "PROJECT_WORKERS", registry)
+    registry.write_text(json.dumps({"projects": {str(root.resolve()): {
+        "image": worker_image(), "base": worker_image(), "requirements": "requirements.txt",
+        "requirements_sha256": requirements_digest(root / "requirements.txt")}}}))
+    asset, calls, findings, evidence = "app/access.py", 0, {}, {}
+
+    def respond(body):
+        nonlocal calls
+        if any(message["content"].startswith("Summarize an ongoing") for message in body["messages"]):
+            return {"summary": "Focused one slice and verified its finding."}
+        calls += 1
+        messages = body["messages"]
+        if calls == 1:
+            return {"action": "workspace.focus", "parameters": {"paths": [asset]}}
+        if calls == 2:
+            observed = json.loads(messages[-2]["content"].split("\n", 1)[1])
+            return {"action": "findings.record", "parameters": {"findings": [{
+                "path": asset, "title": "Cross-owner access", "severity": "high",
+                "explanation": "A different actor may read the owner's data",
+                "remediation": "Compare owner and actor", "evidence_ids": [observed["evidence_id"]]}]}}
+        if calls == 3:
+            return {"action": "code.edit", "parameters": {"paths": list(tests), "instruction": "Write the regression and its controls"}}
+        if calls == 4:
+            return {"files": [{"path": path, "content": content} for path, content in tests.items()]}
+        if calls == 5:
+            return {"action": "findings.test", "parameters": {
+                "finding_id": findings[asset], "hypothesis": "A different owner is accepted",
+                "expected_secure_behavior": "Reject a different authenticated owner",
+                "source_paths": [asset], "tests": paths}}
+        if calls == 6:
+            return {"action": "findings.verdict", "parameters": {
+                "finding_id": findings[asset], "test_evidence_id": evidence[asset], "interpretation": "reproduced",
+                "explanation": "The real module accepted a different owner under its own controls."}}
+        return {"action": "finish", "parameters": {"summary": "One slice verified inside the project worker."}}
+
+    def progress(event):
+        for item in event.get("findings") or []:
+            findings[item["asset"]] = item["id"]
+            if (item.get("verification") or {}).get("test_evidence_id"):
+                evidence[item["asset"]] = item["verification"]["test_evidence_id"]
+
+    assessment = {"decision": "agree", "summary": "The runtime evidence supports the scoped verdict",
+                  "test_assessment": "Real module with positive and negative controls", "remaining_concerns": []}
+    window = {"context_length": 131072, "max_output_tokens": 32768}
+    with endpoint("ollama", replies=lambda _: assessment) as (local, _), endpoint("openai", replies=respond, metadata=window) as (coding, _):
+        result = run_agent("Audit this large project slice by slice", tmp_path / "runs", project=root,
+                           coding=coding, use_mcp=False, audit_only=True, max_steps=10, on_progress=progress,
+                           config=local_inference(local.base_url))
+    assert result["status"] == "complete", result
+    run = Path(result["report"]).parent
+    report = json.loads((run / "report.json").read_text())
+    assert report["worker"]["image"] == worker_image()
+    assert report["worker"]["project_dependencies"]["requirements"] == "requirements.txt"
+    assert any("requirements.txt" in gap and "installed from the public index" in gap for gap in report["coverage_gaps"])
+    item = report["findings"][0]
+    assert item["verification"]["state"] == "reproduced"
+    record = read_evidence(run, item["verification"]["test_evidence_id"])["data"]["result"]
+    assert {role: case["outcome"] for role, case in record["cases"].items()} == {
+        "positive_control": "passed", "negative_control": "passed", "regression": "assertion_failed"}
+    isolation = next(read_evidence(run, entry["id"])["data"] for entry in json.loads((run / "manifest.json").read_text())["evidence"]
+                     if read_evidence(run, entry["id"])["kind"] == "workspace_isolation")
+    assert isolation["project_worker"]["requirements_sha256"] == requirements_digest(root / "requirements.txt")
