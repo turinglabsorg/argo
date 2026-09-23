@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 from review_helpers import unpack_review
 from test_finding_validation import finding, fixture
-from test_providers import endpoint
+from test_providers import endpoint, local_inference
 
 from argo.agent import run_agent
 from argo.agent_findings import load_agent_findings, merge_findings
@@ -254,7 +254,7 @@ def test_controller_cannot_skip_or_defer_its_way_past_review(tmp_path, monkeypat
 
     with endpoint("ollama", replies=reviewer) as (local, _), endpoint("openai", replies=coordinator, metadata={"context_length": 131072}) as (coding, _):
         monkeypatch.setattr("argo.inference.ENDPOINT", local.base_url)
-        result = run_agent("Assess and repair the owned fixture only after review", tmp_path / "runs", seed={**source, **tests}, coding=coding, use_mcp=False, on_progress=progress, max_steps=16)
+        result = run_agent("Assess and repair the owned fixture only after review", tmp_path / "runs", seed={**source, **tests}, coding=coding, use_mcp=False, on_progress=progress, max_steps=16, config=local_inference(local.base_url))
     root = Path(result["report"]).parent
     report = json.loads((root / "report.json").read_text())
     assert result["status"] == "incomplete", report["summary"]

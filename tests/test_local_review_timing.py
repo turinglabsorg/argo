@@ -3,7 +3,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from test_providers import endpoint
+from test_providers import endpoint, local_inference
 
 from argo.agent import run_agent
 from argo.agent_models import ANALYST, QWEN, REVIEWER, LocalModelError, review, review_limits
@@ -75,7 +75,8 @@ def test_long_foundation_review_completes_through_controller_and_saves_evidence(
     with endpoint('ollama', replies=response) as (local, _), endpoint('openai', replies=actions) as (coding, _):
         monkeypatch.setattr('argo.inference.ENDPOINT', local.base_url)
         result = run_agent('Review source without edits', tmp_path, seed={'app.py': 'value = 1'},
-                           coding=coding, use_mcp=False, required_reviews=(ANALYST,), max_steps=2)
+                           coding=coding, use_mcp=False, required_reviews=(ANALYST,), max_steps=2,
+                           config=local_inference(local.base_url))
     assert result['status'] == 'complete'
     path = Path(result['report']).parent
     report = json.loads((path / 'report.json').read_text())
@@ -112,7 +113,7 @@ def test_required_review_budget_covers_source_reading_before_inference(tmp_path,
         monkeypatch.setattr('argo.inference.ENDPOINT', local.base_url)
         result = run_agent('Audit source after a long initial inventory', tmp_path, seed={'app.py': 'value = 1'},
                            coding=coding, use_mcp=False, required_reviews=required, max_steps=4, on_progress=progress,
-                           intelligence_mode=mode)
+                           intelligence_mode=mode, config=local_inference(local.base_url))
     assert result['status'] == ('complete' if accepted else 'failed')
     if not accepted:
         assert result['summary'] == 'Agent task deadline exceeded'

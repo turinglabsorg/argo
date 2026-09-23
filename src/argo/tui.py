@@ -901,7 +901,7 @@ class ArgoApp(App):
         try:
             options = {
                 "profile": self.agent_profile, "use_mcp": self.agent_mcp,
-                "config": resolve(self.project),
+                "config": resolve(self.project, self.settings_path),
                 "intelligence_mode": load_mode(self.intelligence_path),
                 "test_database": self.test_database,
                 "skip_local_reviews": self.skip_local_reviews,

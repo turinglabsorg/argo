@@ -3,7 +3,7 @@ from pathlib import Path
 
 import httpx
 import pytest
-from test_providers import endpoint
+from test_providers import endpoint, local_inference
 
 from argo.agent import run_agent
 from argo.agent_models import ANALYST, LocalModelError, review
@@ -132,7 +132,7 @@ def test_controller_persists_partial_review_without_accepting_missing_coverage(t
     ]
     with endpoint('ollama', chunks=chunks) as (local, _), endpoint('openai', replies=actions) as (coding, _):
         monkeypatch.setattr('argo.inference.ENDPOINT', local.base_url)
-        output = run_agent('Review both files', tmp_path, seed={'good.ts': 'const good = 1;', 'bad.ts': 'const bad = 2;'}, coding=coding, use_mcp=False, required_reviews=(ANALYST,), max_steps=2)
+        output = run_agent('Review both files', tmp_path, seed={'good.ts': 'const good = 1;', 'bad.ts': 'const bad = 2;'}, coding=coding, use_mcp=False, required_reviews=(ANALYST,), max_steps=2, config=local_inference(local.base_url))
     assert output['status'] == 'incomplete'
     path = Path(output['report']).parent
     report = json.loads((path / 'report.json').read_text())

@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 from test_finding_validation import fixture
-from test_providers import endpoint
+from test_providers import endpoint, local_inference
 
 from argo.agent import run_agent
 from argo.evidence import read_evidence, verify
@@ -73,7 +73,7 @@ def test_verdict_recovery_uses_current_evidence_and_prioritizes_inflight_finding
     assessment = {'decision': 'agree', 'summary': 'The owned scenario supports the proposed verdict', 'test_assessment': 'Real imported implementation with both controls', 'remaining_concerns': []}
     with endpoint('ollama', replies=lambda _: assessment) as (local, requests), endpoint('openai', replies=reply) as (coding, _):
         monkeypatch.setattr('argo.inference.ENDPOINT', local.base_url)
-        result = run_agent('Assess the supplied owned scenarios', tmp_path, seed={**source, **tests, 'tests/support.txt': 'Original test support\n'}, coding=coding, use_mcp=False, max_steps=12)
+        result = run_agent('Assess the supplied owned scenarios', tmp_path, seed={**source, **tests, 'tests/support.txt': 'Original test support\n'}, coding=coding, use_mcp=False, max_steps=12, config=local_inference(local.base_url))
     assert result['status'] == 'incomplete', result
     root = Path(result['report']).parent
     report = json.loads((root / 'report.json').read_text())

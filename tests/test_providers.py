@@ -11,6 +11,7 @@ import pytest
 from textual.widgets import Button, Collapsible, Input, Select
 
 from argo.agent import run_agent
+from argo.config import Resolved
 from argo.evidence import verify
 from argo.model_dialog import ModelDialog
 from argo.providers import CodingProfile, exchange, generate, list_models, load_settings, save_profile
@@ -18,6 +19,11 @@ from argo.tui import ArgoApp
 from argo.workspace import Workspace
 
 SCHEMA = {"type": "object", "properties": {"ok": {"const": True}}, "required": ["ok"], "additionalProperties": False}
+
+def local_inference(base_url):
+    """run_agent resolves its own configuration, so a fake local endpoint must arrive as configuration."""
+    return Resolved(coding=None, reviewers={}, local_endpoint=base_url)
+
 
 
 @contextmanager

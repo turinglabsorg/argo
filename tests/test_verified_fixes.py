@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 from test_finding_validation import finding, fixture
-from test_providers import endpoint
+from test_providers import endpoint, local_inference
 from textual.widgets import DataTable, TextArea
 
 from argo.agent import run_agent
@@ -82,7 +82,7 @@ def test_controller_persists_complete_repair_and_rejects_premature_finish(tmp_pa
     assessment = {'decision': 'agree', 'summary': 'The real ownership tests support this scoped verdict', 'test_assessment': 'Both controls cover valid and absent identities; regression exercises cross-owner input', 'remaining_concerns': []}
     with endpoint('ollama', replies=lambda _: assessment) as (local, requests), endpoint('openai', replies=reply, metadata={'context_length': 131072}) as (coding, _):
         monkeypatch.setattr('argo.inference.ENDPOINT', local.base_url)
-        result = run_agent('Reproduce and fix cross-owner access', tmp_path / 'runs', seed=source, coding=coding, use_mcp=False, max_steps=14, on_progress=progress)
+        result = run_agent('Reproduce and fix cross-owner access', tmp_path / 'runs', seed=source, coding=coding, use_mcp=False, max_steps=14, on_progress=progress, config=local_inference(local.base_url))
     assert result['status'] == 'complete', result
     root = Path(result['report']).parent
     report = json.loads((root / 'report.json').read_text())

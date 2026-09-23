@@ -5,7 +5,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
-from test_providers import endpoint
+from test_providers import endpoint, local_inference
 from textual.widgets import DataTable
 
 from argo.advisories import AdvisoryService, load_mode, review_context, save_mode
@@ -232,7 +232,7 @@ def test_coordinator_cve_lookup_review_runtime_evidence_and_saved_findings(tmp_p
 
     with intelligence_server(monkeypatch), endpoint("ollama", replies=assessment) as (local, _), endpoint("openai", replies=coding_reply, metadata={"context_length": 131072}) as (coding, _):
         monkeypatch.setattr("argo.inference.ENDPOINT", local.base_url)
-        result = run_agent("Audit this Node project and check CVE applicability", tmp_path / "runs", seed={"package-lock.json": LOCK, "auth.cjs": SOURCE, "tests/argo-security/controls.test.cjs": "const test = require('node:test'); const assert = require('node:assert/strict'); test('owned negative control', () => assert.equal(1,1));"}, coding=coding, use_mcp=False, intelligence_mode="connected", on_progress=progress, max_steps=5)
+        result = run_agent("Audit this Node project and check CVE applicability", tmp_path / "runs", seed={"package-lock.json": LOCK, "auth.cjs": SOURCE, "tests/argo-security/controls.test.cjs": "const test = require('node:test'); const assert = require('node:assert/strict'); test('owned negative control', () => assert.equal(1,1));"}, coding=coding, use_mcp=False, intelligence_mode="connected", on_progress=progress, max_steps=5, config=local_inference(local.base_url))
     path = Path(result["report"]).parent
     report = json.loads((path / "report.json").read_text())
     candidate = next(f for f in report["findings"] if f["rule"] == "agent.cve")
