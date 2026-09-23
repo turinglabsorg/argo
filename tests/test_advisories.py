@@ -27,6 +27,11 @@ from argo.tui import ArgoApp
 from argo.workspace import Workspace
 
 IDENTITY = "GHSA-aaaa-bbbb-cccc"
+
+
+def advisory_id(package):
+    """One advisory per fixture package, so a catalogue can hold more than one candidate."""
+    return IDENTITY if package in {None, "jsonwebtoken"} else "GHSA-aaaa-bbbb-dddd"
 CVE = "CVE-2099-12345"
 LOCK = json.dumps({"lockfileVersion": 3, "packages": {
     "": {"name": "owned-fixture", "version": "1.0.0"},
@@ -36,7 +41,7 @@ SOURCE = "module.exports = (jwt, token) => jwt.verify(token, undefined);\n"
 
 
 @contextmanager
-def intelligence_server(monkeypatch, *, paginated=False, malformed=False, malformed_detail=None):
+def intelligence_server(monkeypatch, *, paginated=False, malformed=False, malformed_detail=None, vulnerable=(("jsonwebtoken", "8.5.1"),)):
     requests = []
 
     class Handler(BaseHTTPRequestHandler):
@@ -54,13 +59,16 @@ def intelligence_server(monkeypatch, *, paginated=False, malformed=False, malfor
             if self.path == "/v1/querybatch":
                 rows = []
                 for query in body["queries"]:
-                    row = {"vulns": [{"id": IDENTITY}]} if query["package"]["name"] == "jsonwebtoken" and query["version"] == "8.5.1" else {}
+                    matched = next((name for name, version in vulnerable if (name, version) == (query["package"]["name"], query["version"])), None)
+                    row = {"vulns": [{"id": advisory_id(matched)}]} if matched else {}
                     if paginated and not query.get("page_token"):
                         row["next_page_token"] = "second-page"
                     rows.append(row)
                 data = {"results": rows} if not malformed else {"results": None, "private": "never show raw errors"}
             elif self.path.startswith("/v1/vulns/"):
-                data = {"id": IDENTITY, "aliases": [CVE], "summary": "Owned synthetic advisory", "details": "Requires accepting a missing verification key and unsigned input.", "modified": "2026-09-07T00:00:00Z", "database_specific": {"severity": "HIGH"}, "affected": [{"package": {"ecosystem": "npm", "name": "jsonwebtoken"}, "ranges": [{"type": "SEMVER", "events": [{"introduced": "0"}, {"fixed": "9.0.0"}]}]}], "references": [{"url": "https://example.invalid/owned-advisory"}]}
+                identity = self.path.rsplit("/", 1)[-1]
+                package = next((name for name, _ in vulnerable if advisory_id(name) == identity), "jsonwebtoken")
+                data = {"id": identity, "aliases": [CVE if identity == IDENTITY else CVE.replace("12345", "12346")], "summary": "Owned synthetic advisory", "details": "Requires accepting a missing verification key and unsigned input.", "modified": "2026-09-07T00:00:00Z", "database_specific": {"severity": "HIGH"}, "affected": [{"package": {"ecosystem": "npm", "name": package}, "ranges": [{"type": "SEMVER", "events": [{"introduced": "0"}, {"fixed": "9.0.0"}]}]}], "references": [{"url": "https://example.invalid/owned-advisory"}]}
             elif self.path.startswith("/data/v1/epss"):
                 data = {"data": [{"cve": CVE, "epss": "0.1", "percentile": "0.5", "date": "2026-09-07"}]}
             elif self.path.endswith("known_exploited_vulnerabilities.json"):
@@ -305,3 +313,53 @@ def test_a_wider_reviewer_carries_strictly_more_advisories():
     assert review_batches({"app.py": "value = 1\n"}, ANALYST, narrow)
     with pytest.raises(ValueError, match="CVE context is too large"):
         review_batches({"app.py": "value = 1\n"}, ANALYST, intelligence)
+
+
+@pytest.mark.live
+def test_a_second_review_of_the_same_paths_covers_the_remaining_candidates(tmp_path, monkeypatch):
+    """Six advisories per call means a large catalogue needs several passes over one slice.
+
+    The review gate holds back files that have not been reviewed, never another pass over the
+    files already reviewed, or a project could never get its whole catalogue assessed.
+    """
+    lock = json.dumps({"lockfileVersion": 3, "packages": {
+        "": {"name": "owned-fixture", "version": "1.0.0"},
+        "node_modules/jsonwebtoken": {"version": "8.5.1", "resolved": "https://registry.npmjs.org/jsonwebtoken/-/jsonwebtoken-8.5.1.tgz"},
+        "node_modules/lodash": {"version": "4.17.15", "resolved": "https://registry.npmjs.org/lodash/-/lodash-4.17.15.tgz"},
+    }})
+    candidates, calls = [], []
+
+    def coding_reply(body):
+        calls.append(body)
+        if len(calls) == 1:
+            return {"action": "security.cves", "parameters": {}}
+        if len(calls) <= 3:
+            return {"action": "security.review_all", "parameters": {"paths": ["auth.cjs"], "candidate_ids": [candidates[len(calls) - 2]]}}
+        return {"action": "finish", "parameters": {"summary": "Both advisory candidates assessed over the same slice."}}
+
+    def progress(event):
+        for item in event.get("findings", []) or []:
+            if item.get("rule") == "agent.cve" and item["id"] not in candidates:
+                candidates.append(item["id"])
+        for record in (event.get("result") or {}).get("candidates", []) or []:
+            if record["id"] not in candidates:
+                candidates.append(record["id"])
+
+    with intelligence_server(monkeypatch, vulnerable=(("jsonwebtoken", "8.5.1"), ("lodash", "4.17.15"))), \
+         endpoint("ollama", replies=assessment) as (local, _), \
+         endpoint("openai", replies=coding_reply, metadata={"context_length": 131072}) as (coding, _):
+        monkeypatch.setattr("argo.inference.ENDPOINT", local.base_url)
+        result = run_agent("Audit this Node project and check CVE applicability", tmp_path / "runs",
+                           seed={"package-lock.json": lock, "auth.cjs": SOURCE}, coding=coding, use_mcp=False,
+                           intelligence_mode="connected", on_progress=progress, max_steps=4,
+                           config=local_inference(local.base_url))
+    run = Path(result["report"]).parent
+    report = json.loads((run / "report.json").read_text())
+    assert len(candidates) == 2
+    assert [row["tool"] for row in report["tools"]].count("security.review_all") == 2
+    errors = [read_evidence(run, identity)["data"]["error"] for identity in report["action_errors"]]
+    assert not any("before reviewing new files" in error for error in errors)
+    assessed = {item["id"]: item.get("assessments") or [] for item in report["findings"] if item["rule"] == "agent.cve"}
+    assert set(assessed) == set(candidates)
+    assert all(values for values in assessed.values()), assessed
+    assert verify(run)["status"] == "verified"
