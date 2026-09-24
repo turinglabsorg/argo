@@ -266,8 +266,12 @@ def restore(path):
 
 
 def export(store, before, after, max_files=100):
+    """Write the run's workspace out. A full evidence store costs the snapshot, never the report."""
     validate_files(after, max_files=max_files)
-    identity = store.add("workspace_snapshot", {"files": after})
+    try:
+        identity = store.add("workspace_snapshot", {"files": after})
+    except ValueError:
+        identity = None
     folder = store.path / "code"
     private_dir(folder)
     changes = []
@@ -899,6 +903,11 @@ def run_agent(
                     if status == "complete":
                         status = "incomplete"
             snapshot = export(store, clean(seed), sanitized, max_files=1000 if project else 100)
+            if snapshot is None:
+                gaps.append(
+                    "The evidence budget was exhausted before the final workspace snapshot could be recorded."
+                    " The report, the findings and the exported code are complete; the snapshot has no evidence ID."
+                )
             report = {
                 "kind": "isolated_agent", "run_id": store.run_id, "engagement_id": "isolated-agent", "status": status,
                 "summary": summary, "findings": findings, "coverage_gaps": gaps, "tools": events,

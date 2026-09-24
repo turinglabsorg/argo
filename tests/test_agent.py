@@ -7,13 +7,14 @@ from pathlib import Path
 import httpx
 import pytest
 from jsonschema import Draft202012Validator
+from test_providers import endpoint as provider_endpoint
 
 from argo.agent import TOOLS, action_validation_error, restore, run_agent
 from argo.agent_demo import SEED, VERIFY
 from argo.agent_models import CODER, edit, structured
 from argo.controller import Cancelled
 from argo.data.agent.remote import MCP, endpoint
-from argo.evidence import read_evidence, verify
+from argo.evidence import EvidenceStore, read_evidence, verify
 from argo.mcp import MCPClient, MCPProfile, default_profile
 from argo.workspace import Workspace, validate_files, validate_path
 
@@ -287,3 +288,28 @@ def test_independent_failure_is_recorded_in_report_state_and_manifest(tmp_path, 
     assert report["status"] == "failed"
     assert report["independent_validation"]["passed"] is False
     assert verify(path)["status"] == "verified"
+
+
+@pytest.mark.live
+def test_a_full_evidence_store_costs_the_snapshot_not_the_report(tmp_path, monkeypatch):
+    """Run 0699d420 finished its work and lost everything: export raised inside the finally
+    block, so no report.json was ever written for one reproduced and one refuted finding."""
+    actions = [{"action": "finish", "parameters": {"summary": "Nothing to change in the fixture."}}]
+    with provider_endpoint("openai", replies=actions) as (coding, _):
+        original = EvidenceStore.add
+
+        def add(self, kind, value):
+            if kind == "workspace_snapshot":
+                raise ValueError("Evidence budget exhausted")
+            return original(self, kind, value)
+
+        monkeypatch.setattr(EvidenceStore, "add", add)
+        result = run_agent("Review the fixture", tmp_path, seed={"app.py": "value = 1\n"},
+                           coding=coding, use_mcp=False, max_steps=2)
+    assert result["status"] == "complete", result
+    run = Path(result["report"]).parent
+    report = json.loads((run / "report.json").read_text())
+    assert report["workspace_evidence"] is None
+    assert any("evidence budget was exhausted" in gap for gap in report["coverage_gaps"])
+    assert (run / "code" / "app.py").read_text() == "value = 1\n"
+    assert (run / "report.md").exists()
