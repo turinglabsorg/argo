@@ -27,7 +27,7 @@ from argo.agent_models import (
 from argo.config import apply, resolve
 from argo.context_budget import ModelLimits, estimate_tokens
 from argo.controller import Cancelled
-from argo.conversation import Conversation, save_checkpoint
+from argo.conversation import SUMMARY_TOKENS, Conversation, save_checkpoint
 from argo.evidence import (
     EvidenceStore,
     LiveProgress,
@@ -546,7 +546,7 @@ def run_agent(
                 ]
                 closing = {"role": "user", "content": "Continue with the next action from the latest result. Do not repeat completed work.\nController status:\n" + json.dumps(context)}
                 try:
-                    messages = conversation.prepare(opening, closing, lambda messages, schema: structured(planner, messages, schema, check, tokens=min(8192, limits.context_window // 4), on_retry=lambda event: provider_retry("auto-compact", event), resample=True, **model_options("auto-compact")), check, compact_progress)
+                    messages = conversation.prepare(opening, closing, lambda messages, schema: structured(planner, messages, schema, check, tokens=min(SUMMARY_TOKENS, limits.context_window // 4), on_retry=lambda event: provider_retry("auto-compact", event), resample=True, **model_options("auto-compact")), check, compact_progress)
                 except (ValueError, ProviderHTTPError, ProviderTransientError, ProviderRetryExhausted, httpx.HTTPError, OSError) as exc:
                     # Conversation.prepare deliberately leaves history intact and raises. The turns it could
                     # not summarize are saved evidence, so drop them without a summary and keep reviewing;

@@ -10,7 +10,7 @@ from test_providers import SCHEMA, endpoint
 from argo.agent import run_agent
 from argo.context_budget import ModelLimits, estimate_tokens
 from argo.controller import Cancelled
-from argo.conversation import Conversation
+from argo.conversation import CHARS_PER_TOKEN, SUMMARY_TOKENS, Conversation
 from argo.evidence import read_evidence, verify
 from argo.providers import ProviderResponseError, generate, model_limits
 
@@ -278,3 +278,26 @@ def test_compact_does_not_drop_history_when_checkpoint_cannot_be_saved():
         conversation.prepare([], {'role': 'user', 'content': 'Next'}, lambda *_: {'summary': 'Reviewed prior tool evidence.'}, on_compact=checkpoint)
     assert conversation.observations == original
     assert conversation.summary == '' and conversation.compactions == 0
+
+
+def test_the_summary_cap_matches_the_budget_the_summariser_is_given():
+    """Run 1f7ced33 retried auto-compact thirteen times on invalid_schema and exhausted once.
+
+    The schema accepted 24,000 characters while the granted budget was 8,192 tokens, which a
+    model spends on far more text than that. Asking for more than the schema accepts can only
+    be rejected, and the rejection says nothing the model can act on.
+    """
+    captured = {}
+
+    def summarize(messages, schema):
+        captured["max"] = schema["properties"]["summary"]["maxLength"]
+        return {"summary": "Reviewed app.py; issue E1 is open."}
+
+    for window, expected in ((16384, 4096 * CHARS_PER_TOKEN), (131072, SUMMARY_TOKENS * CHARS_PER_TOKEN)):
+        conversation = Conversation(ModelLimits(context_window=window, max_output_tokens=window // 8))
+        conversation.observations.extend([{"evidence_id": "E1", "untrusted_result": "old " * window},
+                                          {"evidence_id": "E2", "untrusted_result": "latest pytest passed"}])
+        conversation.prepare([{"role": "user", "content": "Task"}], {"role": "user", "content": "Next"}, summarize)
+        granted = min(SUMMARY_TOKENS, window // 4)
+        assert captured["max"] == expected
+        assert captured["max"] >= granted * CHARS_PER_TOKEN

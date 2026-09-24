@@ -530,12 +530,13 @@ def generate(profile, messages, schema, check=lambda: None, tokens=None, on_retr
             if reason is None:
                 raise
         excerpt = getattr(error, "excerpt", None)
+        validation = getattr(error, "validation", None)
         if retries == MAX_PROVIDER_RETRIES:
-            on_retry({"phase": "exhausted", "retry": retries, "max_retries": MAX_PROVIDER_RETRIES, "reason": reason, "excerpt": excerpt})
+            on_retry({"phase": "exhausted", "retry": retries, "max_retries": MAX_PROVIDER_RETRIES, "reason": reason, "excerpt": excerpt, "validation": validation})
             raise ProviderRetryExhausted(reason + "; stopped after 5 automatic retries")
         retries += 1
         delay = retry_delay(error, retries)
-        details = {"retry": retries, "max_retries": MAX_PROVIDER_RETRIES, "reason": reason, "delay_seconds": delay, "excerpt": excerpt}
+        details = {"retry": retries, "max_retries": MAX_PROVIDER_RETRIES, "reason": reason, "delay_seconds": delay, "excerpt": excerpt, "validation": validation}
         on_retry({"phase": "waiting", **details})
         retry_wait(delay, check)
         on_retry({"phase": "retrying", **details})
