@@ -75,3 +75,15 @@ def test_the_coder_guard_measures_the_request_not_the_files():
     assert naive <= budget < actual, (naive, actual)
     empty, _ = edit_request("Rewrite the handler", ["app/handler.py"], {}, task="Audit", feedback={})
     assert estimate_tokens(empty) < actual
+
+
+def test_an_edit_to_a_file_that_does_not_exist_says_what_to_return():
+    """Run 0cf00c89 died on five code.edit calls for a file it was creating: the coder answered
+    with edits, and the rejection told it to pick an existing snippet from an absent file."""
+    with pytest.raises(ValueError, match="does not exist yet"):
+        apply_patches({}, [{"path": "tests/argo-security/test_new.py", "old_text": "def test(", "new_text": "def test_x("}])
+    with pytest.raises(ValueError, match="content or lines"):
+        apply_patches({"app.py": ""}, [{"path": "app.py", "old_text": "value", "new_text": "other"}])
+    assert apply_patches({}, [{"path": "app.py", "old_text": "", "new_text": "value = 1\n"}]) == {"app.py": "value = 1\n"}
+    with pytest.raises(ValueError, match="exactly once"):
+        apply_patches({"app.py": "a\na\n"}, [{"path": "app.py", "old_text": "a", "new_text": "b"}])

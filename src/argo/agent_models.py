@@ -249,6 +249,11 @@ def apply_patches(current, edits):
                 raise ValueError("Empty old_text can only create a new or empty file: " + path)
             updated = new
         else:
+            if not source:
+                # Telling a model to pick an existing snippet from a file that does not exist is
+                # advice it cannot follow, so it retries the same impossible edit until the run
+                # runs out of consecutive attempts.
+                raise ValueError(path + " does not exist yet, so there is nothing to match. Return the whole file in content or lines instead of edits.")
             count = source.count(old)
             if count != 1:
                 raise ValueError("old_text must match exactly once in " + path + "; found " + str(count) + " matches. Use a unique existing snippet.")
