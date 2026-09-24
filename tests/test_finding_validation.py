@@ -11,7 +11,7 @@ from argo.agent_findings import load_agent_findings, merge_findings, proposed_fi
 from argo.agent_models import edit
 from argo.contracts import Finding
 from argo.evidence import read_evidence, verify
-from argo.finding_validation import apply_result, invalidate, queue, run_tests, verdict
+from argo.finding_validation import apply_result, invalidate, next_verification, queue, run_tests, verdict
 from argo.tui import ArgoApp
 from argo.workspace import Workspace
 
@@ -271,3 +271,20 @@ async def test_tui_shows_verdict_and_associated_tests(tmp_path, monkeypatch, siz
         assert "reproduced" in str(app.query_one("#findings", DataTable).get_row_at(0))
         assert "Runtime verification: reproduced" in app.query_one("#finding-detail", TextArea).text
         assert "tests/argo-security/test_regression.py" in app.query_one("#finding-detail", TextArea).text
+
+
+def test_the_audited_source_is_verified_before_dependency_advisories():
+    """Run 040a71d6 left all 38 app/ findings pending: the 57 CVE candidates came first.
+
+    Advisory candidates are recorded before any source review runs, so arrival order puts them
+    at the head of the queue, and a run that spends its budget deferring advisories it cannot
+    execute offline never reaches the application it was pointed at.
+    """
+    advisory = {"id": "a" * 16, "rule": "agent.cve", "asset": "requirements.txt", "title": "CVE", "explanation": "Advisory", "evidence_ids": []}
+    source = {"id": "b" * 16, "rule": "agent.security.review", "asset": "app/auth.py", "title": "Token", "explanation": "Source", "evidence_ids": []}
+    resolved = {**advisory, "id": "c" * 16, "verification": {"state": "refuted"}}
+    findings = [advisory, resolved, source]
+    assert [item["id"] for item in queue(findings)["items"]] == [source["id"], advisory["id"], resolved["id"]]
+    assert next_verification(findings)["finding_id"] == source["id"]
+    tested = {**source, "id": "d" * 16, "asset": "app/database.py", "verification": {"state": "tested"}}
+    assert next_verification([advisory, source, tested])["finding_id"] == tested["id"]

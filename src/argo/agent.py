@@ -63,6 +63,7 @@ from argo.finding_validation import (
     test_observation,
     verdict,
     verdict_guidance,
+    verification_order,
 )
 from argo.finding_validation import GUIDANCE as VERIFICATION_GUIDANCE
 from argo.finding_validation import TOOLS as VERIFICATION_TOOLS
@@ -776,7 +777,7 @@ def run_agent(
                         progress("findings", findings=findings)
                     elif name == "findings.list":
                         offset = arguments["offset"]
-                        result = {**queue(findings, offset, 20), "findings": sorted(findings, key=lambda item: state(item) in RESOLVED)[offset:offset + 20]}
+                        result = {**queue(findings, offset, 20), "findings": sorted(findings, key=verification_order)[offset:offset + 20]}
                     elif name == "findings.test":
                         item = selected_finding(findings, arguments["finding_id"])
 

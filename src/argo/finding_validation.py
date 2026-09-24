@@ -140,8 +140,18 @@ def state(item):
     return (item.get("verification") or {}).get("state", "pending")
 
 
+def verification_order(item):
+    """Unresolved first, and the audited source before advisories about pinned dependencies.
+
+    A project's own code is what the audit is about. Ordering by arrival puts every CVE
+    candidate ahead of it, and a run that spends its budget on advisories it cannot execute
+    offline never reaches a single line of the application it was pointed at.
+    """
+    return (state(item) in RESOLVED, item.get("rule") == "agent.cve")
+
+
 def queue(findings, offset=0, limit=12):
-    ordered = sorted(findings, key=lambda item: state(item) in RESOLVED)
+    ordered = sorted(findings, key=verification_order)
     return {
         "total": len(findings), "counts": dict(Counter(state(item) for item in findings)),
         "items": [{"id": item["id"], "path": item["asset"], "title": item["title"], "state": state(item), "latest_test_evidence_id": (item.get("verification") or {}).get("test_evidence_id")} for item in ordered[offset:offset + limit]],
@@ -150,7 +160,7 @@ def queue(findings, offset=0, limit=12):
 
 
 def next_verification(findings, test_results=None, require_review=True):
-    ordered = sorted(findings, key=lambda item: state(item) != "tested")
+    ordered = sorted(findings, key=lambda item: (state(item) != "tested", verification_order(item)))
     item = next((item for item in ordered if state(item) not in RESOLVED), None)
     if item is None:
         return None
