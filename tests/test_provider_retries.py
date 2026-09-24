@@ -385,3 +385,34 @@ def test_a_filtered_ollama_answer_is_not_retried_as_a_bad_sample():
     with provider_endpoint("ollama", chunks=chunks) as (profile, _):
         with pytest.raises(ProviderResponseError, match="filtered"):
             generate(profile, [], SCHEMA, tokens=1024, resample=True)
+
+
+def test_an_enlarged_ollama_window_lifts_the_local_output_guess(monkeypatch):
+    """Run 040a71d6 died writing test files: 4,096 output tokens, no room the ladder could add.
+
+    The Ollama limits branch guesses that ceiling from the 16k local-memory cap. A hosted model
+    the operator has opened to 131k is not that machine, and the guess must not survive as a
+    hard limit the expansion ladder can never pass.
+    """
+    local = ModelLimits(context_window=16384, max_output_tokens=4096, source=providers.LOCAL_OLLAMA_SOURCE)
+    monkeypatch.setattr(providers, "request", lambda *_args, **_kwargs: local.model_dump())
+    providers.LIMIT_CACHE.clear()
+    hosted = CodingProfile(name="cloud", protocol="ollama", base_url="https://provider.invalid", model="m", context_window=131072)
+    limits = providers.model_limits(hosted)
+    assert limits.context_window == 131072
+    assert limits.max_output_tokens == 16384
+    messages = [{"role": "user", "content": "x" * 40000}]
+    # The first request now asks for what writing three test files needs, four times the guess.
+    assert limits.initial_output(messages, {}, hosted.max_tokens) == 16384
+    assert ModelLimits(context_window=131072, max_output_tokens=4096).initial_output(messages, {}, None) == 4096
+
+    providers.LIMIT_CACHE.clear()
+    same = CodingProfile(name="local", protocol="ollama", base_url="http://127.0.0.1:11434", model="m", context_window=8192)
+    assert providers.model_limits(same).max_output_tokens == 4096
+
+    providers.LIMIT_CACHE.clear()
+    advertised = ModelLimits(context_window=32768, max_output_tokens=8192, source="Model API")
+    monkeypatch.setattr(providers, "request", lambda *_args, **_kwargs: advertised.model_dump())
+    kept = CodingProfile(name="api", protocol="openai", base_url="https://provider.invalid/v1", model="m", context_window=131072)
+    assert providers.model_limits(kept).max_output_tokens == 8192
+    providers.LIMIT_CACHE.clear()

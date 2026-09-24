@@ -24,6 +24,7 @@ DEFAULT_MODEL = "argo-coder:30b-a3b"
 OPENROUTER_APP_URL = "https://github.com/turinglabsorg/argo"
 LIMIT_CACHE = {}
 MAX_PROVIDER_RETRIES = 5
+LOCAL_OLLAMA_SOURCE = "Ollama API; active num_ctx capped at 16,384 for local memory"
 PROVIDER_METADATA_DEADLINE = 300
 PROVIDER_GENERATION_DEADLINE = 1200
 PROVIDER_CHILD_TIMEOUT = PROVIDER_GENERATION_DEADLINE + 60
@@ -255,7 +256,7 @@ def exchange(profile, operation, messages=None, schema=None, tokens=4096, check=
                 data = bounded_json(response, check, started)
             advertised = [positive_int(value) for name, value in data.get("model_info", {}).items() if name.endswith(".context_length")]
             context = min([16384, *(value for value in advertised if value)])
-            return ModelLimits(context_window=context, max_output_tokens=min(4096, context // 2), source="Ollama API; active num_ctx capped at 16,384 for local memory").model_dump()
+            return ModelLimits(context_window=context, max_output_tokens=min(4096, context // 2), source=LOCAL_OLLAMA_SOURCE).model_dump()
         if operation in {"models", "limits"}:
             with client.stream("GET", profile.url("models"), headers=headers) as response:
                 data = bounded_json(response, check, started)
@@ -453,7 +454,13 @@ def model_limits(profile, check=lambda: None, refresh=False):
         check()
         limits = ModelLimits(source="Fallback: model limits unavailable from endpoint")
     if profile.context_window:
-        limits = limits.model_copy(update={"context_window": profile.context_window, "source": "User context override"})
+        update = {"context_window": profile.context_window, "source": "User context override"}
+        if limits.source.startswith(LOCAL_OLLAMA_SOURCE) and profile.context_window > limits.context_window:
+            # That output ceiling is a local-memory guess tied to the 16k cap this override
+            # just lifted. Left in place it becomes a hard limit no expansion can pass, and a
+            # truncated answer can only fail: the coder cannot write three files in 4,096 tokens.
+            update["max_output_tokens"] = min(profile.context_window // 8, 32768)
+        limits = limits.model_copy(update=update)
     LIMIT_CACHE[cache_key] = (time.monotonic(), limits)
     return limits
 
