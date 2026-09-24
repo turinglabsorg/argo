@@ -16,6 +16,7 @@ from argo.agent_models import (
     QWEN,
     SPECIALISTS,
     edit,
+    edit_request,
     local_model_error,
     ready,
     review,
@@ -692,12 +693,16 @@ def run_agent(
                             }
                             raise ValueError("Coding context_paths must name existing visible workspace files: " + ", ".join(unknown)[:240])
                         feedback = {"latest_test": latest_test, "context_summary": conversation.summary}
-                        context_budget = limits.input_budget - estimate_tokens([task, arguments, feedback]) - 2048
-                        if estimate_tokens(context) > context_budget:
+
+                        def coder_fits(selection):
+                            """Measure the request the coder will receive, not the files alone."""
+                            return estimate_tokens(edit_request(arguments["instruction"], paths, selection, task, feedback)) <= limits.input_budget
+
+                        if not coder_fits(context):
                             raise ValueError("Selected files exceed the coding model context budget; edit fewer files at a time")
                         for path in context_paths:
                             content = current[path]
-                            if path not in context and estimate_tokens({**context, path: content}) <= context_budget:
+                            if path not in context and coder_fits({**context, path: content}):
                                 context[path] = content
                         values = edit(arguments["instruction"], paths, context, check, task=task, feedback=feedback, on_retry=lambda event: provider_retry("coding", event), validate_code=lambda values: workspace.call("validate_code", files=values) if any(path.endswith((".cjs", ".mjs")) for path in values) else None, **model_options("coding"))
                         result = workspace.call("write", files=values, expected={path: current.get(path) for path in values})

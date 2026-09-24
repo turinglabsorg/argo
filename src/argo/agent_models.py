@@ -271,7 +271,13 @@ def decode_coder_files(result, files):
     return values
 
 
-def edit(instruction, paths, files, check=lambda: None, task="", feedback=None, profile=None, on_retry=lambda _: None, session_id=None, on_usage=lambda _: None, validate_code=lambda _: None):
+def edit_request(instruction, paths, files, task="", feedback=None):
+    """The exact payload edit() sends, so a caller can size a request before making it.
+
+    The workspace is serialised into a message that is itself serialised, so source with
+    quotes and newlines is escaped twice. A guard that measures the files alone underestimates
+    what the provider receives and lets through a request the provider then refuses.
+    """
     schema = {
         "type": "object", "properties": {"files": {"type": "array", "minItems": 1, "maxItems": len(paths), "items": {
             "type": "object", "properties": {
@@ -293,6 +299,11 @@ def edit(instruction, paths, files, check=lambda: None, task="", feedback=None, 
     ]
     messages[0]["content"] += " Preserve actual line breaks in source strings (escaped as \\n in JSON); never flatten comments and code onto one line. Dedicated Node finding tests must register test/it cases on separate lines and use assertions. Never call process.exit or process.reallyExit in tests; close handles with test hooks and let the runner finish. The runtime also provides Node.js 22; use only dependencies already installed in the project."
     messages[0]["content"] += " Prefer files[].edits with unique old_text/new_text. Use content or lines only for new files. Never rewrite an existing file in full. Copy source characters exactly, including identifiers such as json."
+    return messages, schema
+
+
+def edit(instruction, paths, files, check=lambda: None, task="", feedback=None, profile=None, on_retry=lambda _: None, session_id=None, on_usage=lambda _: None, validate_code=lambda _: None):
+    messages, schema = edit_request(instruction, paths, files, task, feedback)
     available = set(sys.stdlib_module_names) | {"pytest", "bandit", "yaml", "rich", "pluggy", "packaging", "stevedore", "pygments", "markdown_it", "mdurl", "iniconfig"}
     available |= {path.split("/")[0].removesuffix(".py") for path in files.keys() | set(paths)}
     coding = profile.model_copy(update={"output_mode": "prompt"}) if profile is not None else None

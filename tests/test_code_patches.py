@@ -1,6 +1,7 @@
 import pytest
 
-from argo.agent_models import apply_patches, edit
+from argo.agent_models import apply_patches, edit, edit_request
+from argo.context_budget import estimate_tokens
 from argo.providers import CodingProfile
 
 
@@ -57,3 +58,20 @@ def test_coder_forces_prompt_output_mode_for_source_edits(monkeypatch):
     assert captured["profile"].output_mode == "prompt"
     assert captured["profile"].model == "fixture"
     assert profile.output_mode == "json_schema"
+
+
+def test_the_coder_guard_measures_the_request_not_the_files():
+    """Run 0699d420 had twelve code.edit calls refused as context-full after passing the guard.
+
+    The workspace is serialised into a message that is serialised again, so source full of
+    quotes and newlines costs far more than the files measured on their own.
+    """
+    source = {"app/handler.py": 'def handler():\n    return {"key": "value", "other": "\\n"}\n' * 400}
+    naive = estimate_tokens(source)
+    messages, schema = edit_request("Rewrite the handler", ["app/handler.py"], source, task="Audit", feedback={})
+    actual = estimate_tokens([messages, schema])
+    # A budget in between is exactly the window the old guard allowed through and the provider refused.
+    budget = (naive + actual) // 2
+    assert naive <= budget < actual, (naive, actual)
+    empty, _ = edit_request("Rewrite the handler", ["app/handler.py"], {}, task="Audit", feedback={})
+    assert estimate_tokens(empty) < actual
